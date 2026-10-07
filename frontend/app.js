@@ -343,6 +343,10 @@ function toggleSettings(force) {
   $('btn-settings').classList.toggle('on', !settingsPop.hidden);
 }
 
+// Toolbar buttons don't take focus when clicked, so keyboard shortcuts used
+// afterwards don't leave a focus ring on them.
+for (const b of document.querySelectorAll('#bar .icon')) b.addEventListener('mousedown', (e) => e.preventDefault());
+
 $('btn-open').addEventListener('click', openDialog);
 $('empty-open').addEventListener('click', openDialog);
 $('btn-reload').addEventListener('click', reload);

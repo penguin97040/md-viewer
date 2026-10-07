@@ -3,6 +3,17 @@
 A small, fast markdown viewer for Windows, macOS and Linux. It's a single
 executable with no installer and no runtime to set up.
 
+<p align="center">
+  <a href="docs/screenshots/dark.png"><img src="docs/screenshots/dark.png" width="560" alt="MD Viewer in the dark theme, with tabs, a table of contents, a table and a diagram"></a>
+</p>
+<p align="center">
+  <a href="docs/screenshots/light.png"><img src="docs/screenshots/light.png" width="180" alt="Light theme with maths and highlighted code"></a>
+  <a href="docs/screenshots/diagrams.png"><img src="docs/screenshots/diagrams.png" width="180" alt="Mermaid diagram and maths"></a>
+  <a href="docs/screenshots/find.png"><img src="docs/screenshots/find.png" width="180" alt="Find with highlighted matches"></a>
+  <a href="docs/screenshots/settings.png"><img src="docs/screenshots/settings.png" width="180" alt="Settings"></a>
+</p>
+<p align="center"><sub>Click a screenshot to see it full size.</sub></p>
+
 - Tabs: open several files at once; opening another file from Explorer or
   Finder adds a tab to the window that's already open
 - Dark mode by default, with a light theme
@@ -100,9 +111,10 @@ wails build -tags webkit2_41                  # Linux with WebKitGTK 4.1
 The executable is written to `build/bin/`. Linux builds need
 `libgtk-3-dev` and `libwebkit2gtk-4.1-dev`.
 
-Run the tests with `go test ./internal/...`. For quick work on the interface,
+Run the tests with `go test ./...`. For quick work on the interface,
 `go run ./cmd/devserver file.md` serves the frontend to an ordinary browser at
-<http://127.0.0.1:8080>.
+<http://127.0.0.1:8080>. `scripts/screenshots.mjs` regenerates the screenshots
+above (see the comment at the top of the file).
 
 ### How it works
 
