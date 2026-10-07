@@ -31,6 +31,8 @@ executable with no installer and no runtime to set up.
 - Handles large files (tested to 25 MB) by rendering only what's near the
   screen
 - Opens local `.md` links in a new tab; web links open in your browser
+- Safe with files from anywhere: documents can't run script, and images from
+  the web only load if you agree (see [SECURITY.md](SECURITY.md))
 
 ## Download
 
@@ -125,6 +127,10 @@ Files over 1 MB are cut into sections at safe block boundaries and parsed in
 parallel, so a 25 MB file opens in well under a second and memory stays close
 to the file's size. Mermaid and KaTeX are embedded in the executable,
 compressed, and only loaded when a document uses them.
+
+Each chunk's HTML is sanitised before the page sees it, and the page's
+Content-Security-Policy keeps out script and anything from outside the app.
+[SECURITY.md](SECURITY.md) has the details and how to report a problem.
 
 ## Licence
 

@@ -5,7 +5,10 @@ import { enhance, retheme, installInteractions, printDiagrams, clearPrintDiagram
 
 const go = window.go.main.App;
 const rt = window.runtime;
-const $ = (id) => document.getElementById(id);
+// The app's own elements, found once before any document is shown: a
+// document may use the same ids, and getElementById returns the first.
+const shell = new Map([...document.querySelectorAll('[id]')].map((el) => [el.id, el]));
+const $ = (id) => shell.get(id);
 const html = document.documentElement;
 const isMac = navigator.platform.toUpperCase().includes('MAC');
 
@@ -95,7 +98,10 @@ function updateCurrent() {
 
 const tabs = new Tabs($('tabs'), $('docs'), {
   fetchChunk: (id, i) => go.Chunk(id, i),
-  afterMount: (el) => enhance(el, settings.theme),
+  afterMount: (el, tab) => {
+    webImages(tab, el);
+    enhance(el, settings.theme);
+  },
   onScroll: (tab) => {
     if (tab === tabs.active && !rafPending) {
       rafPending = true;
@@ -104,8 +110,7 @@ const tabs = new Tabs($('tabs'), $('docs'), {
   },
   onActivate: activated,
   onClose: (tab) => {
-    const id = tab.pending?.id ?? tab.info?.id;
-    if (id) go.Close(id);
+    if (tab.key) go.Close(tab.key);
   },
 });
 
@@ -123,6 +128,7 @@ let shown = null; // the tab the TOC and title currently describe
 async function activated(tab) {
   if (shown && shown !== tab) shown.tocScroll = tocNav.scrollTop;
   shown = tab;
+  updateWebBar();
   if (!tab) {
     document.body.classList.remove('has-doc');
     tocNav.hidden = true;
@@ -182,7 +188,7 @@ async function openMany(paths) {
 
 async function openDialog() {
   try {
-    const p = await go.PickFile(tabs.active?.info?.id ?? 0);
+    const p = await go.PickFile(tabs.active?.key ?? 0);
     if (p) await openPath(p);
   } catch (e) {
     showError(e);
@@ -197,29 +203,33 @@ function refresh(tab) {
   find.reset();
 }
 
+// showParse shows a newer parse of a tab's file: now if the tab is showing,
+// otherwise when it is next shown. Ids only grow, so an older parse that
+// arrives late (a reload overtaken by a live reload) is ignored.
+async function showParse(tab, info) {
+  if (!tabs.list.includes(tab) || info.id <= tab.newestId) return;
+  if (tab !== tabs.active) {
+    tab.pending = info;
+    return;
+  }
+  if (await tab.load(info, true)) refresh(tab);
+}
+
 async function reload() {
   const tab = tabs.active;
-  if (!tab?.info?.id) return;
-  const id = tab.info.id;
+  if (!tab?.key) return;
   try {
-    const info = await go.Reload(id);
-    if (tab.info.id !== id) return; // a live reload got there first
-    await tab.load(info, true);
-    refresh(tab);
+    await showParse(tab, await go.Reload(tab.key));
   } catch (e) {
-    if (tab.info.id === id) showError(e);
+    if (tabs.list.includes(tab)) showError(e);
   }
 }
 
-rt.EventsOn('doc:changed', async (old, info) => {
-  const tab = tabs.list.find((t) => (t.pending?.id ?? t.info?.id) === old);
-  if (!tab) return;
-  if (tab !== tabs.active) {
-    tab.pending = info; // loaded when the tab is next shown
-    return;
-  }
-  await tab.load(info, true);
-  refresh(tab);
+// Live reloads. A tab closed meanwhile has already closed its document in
+// Go, whatever the parse, so there is nothing to tidy up here.
+rt.EventsOn('doc:changed', (info) => {
+  const tab = tabs.byKey(info.key);
+  if (tab) showParse(tab, info);
 });
 rt.EventsOn('open:paths', openMany);
 rt.EventsOn('doc:error', showError);
@@ -263,11 +273,59 @@ function hideToast() {
   $('toast').hidden = true;
 }
 
+// ---- Web images ----
+
+// Go holds back images on the web (data-web-src) because loading one tells
+// its site that the file was opened, and from where. They load, through Go,
+// once the reader agrees for that tab.
+const isWeb = (u) => /^(https?:|[\\/]{2})/i.test(u.replace(/[\t\n\r]/g, '').trimStart());
+
+function webImages(tab, root) {
+  const els = root.querySelectorAll('[data-web-src], [data-web-srcset]');
+  if (!els.length) return;
+  if (!tab.webImages) {
+    tab.hasWebImages = true;
+    if (tab === tabs.active) updateWebBar();
+    return;
+  }
+  const via = (u) => (isWeb(u) ? tab.info.web + '?u=' + encodeURIComponent(u) : u);
+  for (const el of els) {
+    const { webSrc, webSrcset } = el.dataset;
+    delete el.dataset.webSrc;
+    delete el.dataset.webSrcset;
+    if (webSrcset) {
+      el.srcset = webSrcset.split(',').map((c) => {
+        const [u, ...rest] = c.trim().split(/\s+/);
+        return [via(u), ...rest].join(' ');
+      }).join(', ');
+    }
+    if (webSrc) el.src = via(webSrc);
+  }
+}
+
+function updateWebBar() {
+  const tab = tabs.active;
+  $('webbar').hidden = !(tab?.hasWebImages && !tab.webImages && !tab.webDismissed);
+}
+
+$('web-load').addEventListener('click', () => {
+  const tab = tabs.active;
+  if (!tab) return;
+  tab.webImages = true;
+  webImages(tab, tab.docEl);
+  updateWebBar();
+});
+$('web-close').addEventListener('click', () => {
+  if (tabs.active) tabs.active.webDismissed = true;
+  updateWebBar();
+});
+
 // ---- Links ----
 
 const MD_EXT = /\.(md|markdown|mdown|mkd|mkdn|mdx|txt)$/i;
 
-$('docs').addEventListener('click', async (e) => {
+// Every link is handled here: the web view itself never navigates.
+async function followLink(e) {
   const a = e.target.closest('.md a[href]');
   const tab = tabs.active;
   if (!a || !tab) return;
@@ -278,10 +336,21 @@ $('docs').addEventListener('click', async (e) => {
   const [path, frag = ''] = href.split('#');
   if (!MD_EXT.test(path.split('?')[0])) return;
   try {
-    await openPath(await go.ResolveLink(tab.info.id, path), frag);
+    await openPath(await go.ResolveLink(tab.key, path), frag);
   } catch (err) {
     showError(err);
   }
+}
+
+$('docs').addEventListener('click', followLink);
+// A middle click would otherwise open the link in a new web view window.
+$('docs').addEventListener('auxclick', (e) => {
+  if (e.button === 1) followLink(e);
+});
+// Links and images dragged out of a document would carry their addresses
+// to wherever they are dropped, including back into the web view.
+$('docs').addEventListener('dragstart', (e) => {
+  if (e.target.closest?.('.md a, .md img')) e.preventDefault();
 });
 
 installInteractions(async (text) => {
@@ -290,33 +359,47 @@ installInteractions(async (text) => {
 
 // ---- Save as PDF / print ----
 
-let printing = null; // the tab being printed
+let printing = null; // { tab, done } while a PDF is prepared or printed
 
 async function savePdf() {
   const tab = tabs.active;
   if (!tab?.info?.chunks || printing) return;
-  printing = tab;
+  // Aborting done removes whichever end-of-print listeners are left, so
+  // none can fire during a later print.
+  const done = new AbortController();
+  printing = { tab, done };
+  const gen = tab.viewer.gen;
   let cancelled = false;
   const cancel = { label: 'Cancel', fn: () => { cancelled = true; } };
+  // check stops if the PDF can no longer come from what this tab shows:
+  // the print CSS prints only the visible tab.
+  const check = () => {
+    if (cancelled) throw new Error('cancelled');
+    if (tabs.active !== tab) throw new Error('Save as PDF stopped because the tab changed');
+    if (tab.viewer.gen !== gen) throw new Error('Save as PDF stopped because the file changed');
+  };
   try {
     toast('Preparing PDF…', { sticky: true, action: cancel });
     const complete = await tab.viewer.mountAll((p) => {
       toastText(`Preparing PDF… ${Math.round(p * 100)}%`);
       return !cancelled;
     });
-    if (!complete || cancelled) throw new Error('cancelled');
+    check();
+    if (!complete) throw new Error('Save as PDF stopped because part of the file could not be loaded');
     // Print in light colours: diagrams get light copies shown only in print.
     if (settings.theme === 'dark') await printDiagrams(tab.docEl);
     await idle();
     await Promise.all([...tab.docEl.querySelectorAll('img')].map((img) => img.decode().catch(() => {})));
+    check();
     hideToast();
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-    window.addEventListener('afterprint', finishPrint, { once: true });
+    check();
+    window.addEventListener('afterprint', finishPrint, { once: true, signal: done.signal });
     if (isMac) {
       // The macOS print sheet doesn't fire afterprint; tidy up on the next
       // input once it has closed.
       setTimeout(() => {
-        for (const ev of ['pointermove', 'keydown']) window.addEventListener(ev, finishPrint, { once: true });
+        for (const ev of ['pointermove', 'keydown']) window.addEventListener(ev, finishPrint, { once: true, signal: done.signal });
       }, 1000);
     }
     await go.Print();
@@ -328,9 +411,10 @@ async function savePdf() {
 }
 
 function finishPrint() {
-  const tab = printing;
-  if (!tab) return;
+  if (!printing) return;
+  const { tab, done } = printing;
   printing = null;
+  done.abort();
   clearPrintDiagrams(tab.docEl);
   tab.viewer.resumeUnmount();
 }

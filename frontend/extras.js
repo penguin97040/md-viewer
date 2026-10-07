@@ -31,8 +31,10 @@ function loadStyle(href) {
 const mathCache = new Map();
 let mathDone = Promise.resolve();
 
+// Renders run in order on one chain; a failure is caught so it can't stop
+// later renders (or idle) for the rest of the session.
 function renderMath(root) {
-  mathDone = mathDone.then(() => renderMathNow(root));
+  mathDone = mathDone.then(() => renderMathNow(root)).catch(() => {});
 }
 
 async function renderMathNow(root) {
@@ -51,7 +53,14 @@ async function renderMathNow(root) {
     const key = (display ? 'D' : 'I') + src;
     let html = mathCache.get(key);
     if (html === undefined) {
-      html = window.katex.renderToString(src, { displayMode: display, throwOnError: false, output: 'htmlAndMathml' });
+      try {
+        html = window.katex.renderToString(src, {
+          displayMode: display, throwOnError: false, output: 'htmlAndMathml',
+          maxSize: 50, // em; stops a huge \rule from covering the window
+        });
+      } catch {
+        continue; // left as source text
+      }
       if (mathCache.size > 2000) mathCache.clear();
       mathCache.set(key, html);
     }
@@ -74,6 +83,11 @@ async function mermaidReady(theme) {
     window.mermaid.initialize({
       startOnLoad: false,
       securityLevel: 'strict',
+      // Documents can't change these with %%{init}%% directives. The font
+      // and theme CSS are pasted into the diagram's stylesheet, which applies
+      // to the whole page.
+      secure: ['secure', 'securityLevel', 'startOnLoad', 'maxTextSize', 'suppressErrorRendering', 'maxEdges',
+        'fontFamily', 'altFontFamily', 'themeCSS', 'themeVariables'],
       theme: theme === 'dark' ? 'dark' : 'default',
       fontFamily: getComputedStyle(document.body).fontFamily,
     });
@@ -81,12 +95,19 @@ async function mermaidReady(theme) {
   }
 }
 
-// renderDiagrams turns <pre class="mermaid"> blocks into diagrams. Renders run
-// one at a time because mermaid is not safe to call concurrently.
+// enqueue adds a job to the diagram queue. Jobs run one at a time because
+// mermaid is not safe to call concurrently; a failure is caught so later jobs
+// still run.
+function enqueue(job) {
+  queue = queue.then(job).catch(() => {});
+  return queue;
+}
+
+// renderDiagrams turns <pre class="mermaid"> blocks into diagrams.
 function renderDiagrams(root, theme) {
   const els = [...root.querySelectorAll('pre.mermaid')];
   if (!els.length) return;
-  queue = queue.then(async () => {
+  enqueue(async () => {
     try {
       await mermaidReady(theme);
     } catch {
@@ -123,11 +144,12 @@ function renderDiagrams(root, theme) {
 
 // printDiagrams adds light-theme copies of diagrams, shown only in print,
 // so a dark-theme document prints on white paper without the screen
-// flashing to light.
+// flashing to light. The diagrams are found when the job runs, after the
+// renders already queued for newly mounted chunks.
 export function printDiagrams(root) {
-  const els = [...root.querySelectorAll('.diagram:not(.has-print):not(.diagram-print)')];
-  if (!els.length) return queue;
-  queue = queue.then(async () => {
+  return enqueue(async () => {
+    const els = [...root.querySelectorAll('.diagram:not(.has-print):not(.diagram-print)')];
+    if (!els.length) return;
     try {
       await mermaidReady('light');
     } catch {
@@ -152,7 +174,6 @@ export function printDiagrams(root) {
       d.after(copy);
     }
   });
-  return queue;
 }
 
 export function clearPrintDiagrams(root) {
@@ -188,21 +209,29 @@ function markSortable(root) {
   }
 }
 
+// Text sorts naturally: "item 2" before "item 10", and versions such as
+// 1.2.0 before 1.10.0.
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
-function asNumber(s) {
-  const t = s.replace(/[\s,$€£%]/g, '');
-  return /^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(t) ? parseFloat(t) : null;
+const NUMBER = /^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i;
+
+function asNumber(s, decimalComma) {
+  let t = s.replace(/[\s$€£¥%]/g, '');
+  if (decimalComma) t = t.replace(/\.(?=\d{3}(\D|$))/g, '').replace(',', '.'); // 1.234,5
+  else if (/^[-+]?\d{1,3}(,\d{3})+(\.\d*)?$/.test(t)) t = t.replace(/,/g, ''); // 1,234.5
+  return NUMBER.test(t) ? parseFloat(t) : null;
 }
 
-function compareCells(a, b) {
-  if (a === b) return 0;
-  if (a === '') return 1; // empty cells last
-  if (b === '') return -1;
-  const na = asNumber(a);
-  const nb = asNumber(b);
-  if (na !== null && nb !== null) return na - nb;
-  return collator.compare(a, b);
+// columnNumbers returns a column's cells as numbers, or null to sort it as
+// text. The choice is made for the whole column so the order is consistent.
+function columnNumbers(cells) {
+  const vals = cells.filter((c) => c !== '');
+  // Version numbers (v2, 1.2.3) sort naturally as text.
+  if (!vals.length || vals.some((v) => /^v\d|\d\.\d+\./i.test(v))) return null;
+  // A comma before 1–2 or 4+ digits, or 1.234,5, means decimal commas.
+  const decimalComma = vals.some((v) => /\d,(\d{1,2}|\d{4,})(\D|$)|\d\.\d{3},\d/.test(v));
+  const nums = cells.map((c) => (c === '' ? null : asNumber(c, decimalComma)));
+  return nums.every((n, i) => n !== null || cells[i] === '') ? nums : null;
 }
 
 // sortBy cycles a column through ascending, descending and original order.
@@ -217,14 +246,15 @@ function sortBy(th) {
   if (next !== 'none') {
     th.setAttribute('aria-sort', next);
     const col = th.cellIndex;
-    const key = (r) => r.cells[col]?.textContent.trim() ?? '';
-    const keyed = rows.map((r) => [key(r), r]);
+    const cells = rows.map((r) => r.cells[col]?.textContent.trim() ?? '');
+    const nums = columnNumbers(cells);
+    const keyed = rows.map((r, i) => ({ r, text: cells[i], num: nums?.[i] }));
+    const dir = next === 'ascending' ? 1 : -1;
     keyed.sort((x, y) => {
-      const c = compareCells(x[0], y[0]);
-      if (x[0] === '' || y[0] === '') return c; // keep empties last either way
-      return next === 'ascending' ? c : -c;
+      if (x.text === '' || y.text === '') return (x.text === '') - (y.text === ''); // empty cells last
+      return dir * (nums ? x.num - y.num : collator.compare(x.text, y.text));
     });
-    rows = keyed.map((x) => x[1]);
+    rows = keyed.map((x) => x.r);
   }
   const frag = document.createDocumentFragment();
   for (const r of rows) frag.append(r);

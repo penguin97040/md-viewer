@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"runtime"
 	"strings"
@@ -36,6 +37,9 @@ const (
 	wholeParseLimit = 1 << 20
 	// htmlCacheLimit bounds how many rendered chunks are kept for large files.
 	htmlCacheLimit = 96
+	// MaxFileBytes is the largest file Load reads, so a huge or endless file
+	// can't use up memory.
+	MaxFileBytes = 256 << 20
 )
 
 // Heading is a table of contents entry.
@@ -91,9 +95,17 @@ type Doc struct {
 
 // Load reads and parses a file.
 func Load(path string) (*Doc, error) {
-	src, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
+	}
+	defer f.Close()
+	src, err := io.ReadAll(io.LimitReader(f, MaxFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(src) > MaxFileBytes {
+		return nil, fmt.Errorf("the file is larger than %d MB", MaxFileBytes>>20)
 	}
 	return Parse(src), nil
 }

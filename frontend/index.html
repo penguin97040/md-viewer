@@ -2,6 +2,10 @@
 <html lang="en-NZ" data-theme="dark">
 <head>
 <meta charset="utf-8">
+<!-- Documents can't run script or reach the internet: everything comes from
+     the app itself. Web images are fetched through Go once the reader
+     agrees. Mermaid and KaTeX need inline styles. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; form-action 'none'; base-uri 'self'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MD Viewer</title>
 <link rel="stylesheet" href="/style.css">
@@ -41,6 +45,14 @@
     <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
   </button>
   <button id="find-close" class="icon small" title="Close (Esc)" aria-label="Close">
+    <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>
+  </button>
+</div>
+
+<div id="webbar" hidden>
+  <span>This file shows images from the web. Loading them lets those sites see that you opened it.</span>
+  <button id="web-load" class="link">Load images</button>
+  <button id="web-close" class="icon small" title="Dismiss" aria-label="Dismiss">
     <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>
   </button>
 </div>

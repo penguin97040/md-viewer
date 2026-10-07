@@ -48,7 +48,7 @@ func main() {
 		BackgroundColour: bg,
 		AssetServer: &assetserver.Options{
 			Assets:  files,
-			Handler: &assetHandler{files: files},
+			Handler: &assetHandler{files: files, store: app.store},
 		},
 		DragAndDrop: &options.DragAndDrop{
 			EnableFileDrop:     true,

@@ -194,6 +194,29 @@ button { font: inherit; color: inherit; }
   font-variant-numeric: tabular-nums;
 }
 
+/* Web images bar */
+#webbar {
+  position: fixed;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: calc(100vw - 28px);
+  padding: 5px 6px 5px 14px;
+  background: var(--bg-bar);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  font-size: 12px;
+  color: var(--muted);
+}
+#webbar[hidden] { display: none; }
+#webbar .link { white-space: nowrap; }
+#webbar:has(~ #toast:not([hidden])) { visibility: hidden; } /* the toast sits in the same place */
+
 /* Settings */
 .popover {
   position: fixed;
@@ -382,6 +405,17 @@ body:not(.has-doc) .md { display: none; }
 .md strong { color: var(--text-strong); font-weight: 600; }
 .md hr { border: 0; border-top: 1px solid var(--border); margin: 2em 0; }
 .md img { max-width: 100%; height: auto; }
+/* A web image held back until the reader agrees: its alt text in a box. */
+.md img[data-web-src]:not([src]) {
+  display: inline-block;
+  min-width: 2em;
+  min-height: 1.4em;
+  padding: 1px 6px;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: .85em;
+}
 .md ul, .md ol { padding-left: 1.7em; }
 .md li + li, .md li > ul, .md li > ol { margin-top: .25em; }
 .md li > p { margin-bottom: .5em; }
@@ -500,7 +534,7 @@ body:not(.has-doc) .md { display: none; }
   }
   @page { margin: 16mm 14mm; }
   html, body, main, #docs, .scroller { height: auto !important; overflow: visible !important; display: block; background: #fff; }
-  #bar, #toc, #findbar, #settings, #toast, #empty, .scroller[hidden], .md .copy { display: none !important; }
+  #bar, #toc, #findbar, #webbar, #settings, #toast, #empty, .scroller[hidden], .md .copy { display: none !important; }
   .md { max-width: none; padding: 0; font-size: 11pt; }
   .chunk { height: auto !important; }
   .md pre, [data-wrap] .md pre { white-space: pre-wrap; overflow: visible; overflow-wrap: anywhere; }

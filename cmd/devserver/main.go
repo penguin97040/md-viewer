@@ -12,6 +12,7 @@ import (
 	"flag"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -20,6 +21,8 @@ import (
 
 	"github.com/penguin97040/md-viewer/internal/doc"
 	"github.com/penguin97040/md-viewer/internal/settings"
+	"github.com/penguin97040/md-viewer/internal/store"
+	"github.com/penguin97040/md-viewer/internal/webimage"
 )
 
 const shim = `
@@ -28,7 +31,7 @@ window.runtime = {
   ClipboardSetText: (t) => navigator.clipboard.writeText(t).then(() => true, () => false),
 };
 const call = (m) => async (...args) => {
-  const r = await fetch('/api/' + m, { method: 'POST', body: JSON.stringify(args) });
+  const r = await fetch('/api/' + m, { method: 'POST', headers: { 'X-Devshim': '1' }, body: JSON.stringify(args) });
   const j = await r.json();
   if (j.error) throw new Error(j.error);
   return j.result;
@@ -36,15 +39,9 @@ const call = (m) => async (...args) => {
 window.go = { main: { App: new Proxy({}, { get: (_, m) => call(m) }) } };
 `
 
-type openDoc struct {
-	doc  *doc.Doc
-	path string
-}
-
 type server struct {
-	mu    sync.Mutex
-	docs  map[int]*openDoc
-	next  int
+	mu    sync.Mutex // guards s
+	docs  *store.Store
 	start []string
 	s     settings.Settings
 }
@@ -52,7 +49,7 @@ type server struct {
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "listen address")
 	flag.Parse()
-	srv := &server{docs: map[int]*openDoc{}, start: flag.Args(), s: settings.Defaults()}
+	srv := &server{docs: store.New(false, nil), start: flag.Args(), s: settings.Defaults()}
 	front := http.FileServer(http.Dir("frontend"))
 
 	http.HandleFunc("/api/", srv.api)
@@ -65,9 +62,17 @@ func main() {
 		io.WriteString(w, doc.HighlightCSS())
 	})
 	http.HandleFunc("/local/", func(w http.ResponseWriter, r *http.Request) {
-		p := "/" + strings.TrimPrefix(r.URL.Path, "/local/")
-		http.ServeFile(w, r, filepath.FromSlash(p))
+		p := store.LocalPath(r.URL.Path)
+		ct, ok := store.ImageType(p)
+		if !ok || !srv.docs.Reachable(p) {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", ct)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		http.ServeFile(w, r, p)
 	})
+	http.HandleFunc(srv.docs.WebPath(), webimage.Serve)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
 			b, _ := os.ReadFile("frontend/index.html")
@@ -85,10 +90,30 @@ func main() {
 		front.ServeHTTP(w, r)
 	})
 	log.Printf("serving on http://%s", *addr)
-	log.Fatal(http.ListenAndServe(*addr, nil))
+	log.Fatal(http.ListenAndServe(*addr, localOnly(*addr, http.DefaultServeMux)))
+}
+
+// localOnly refuses requests whose Host header isn't this server, so a web
+// page open in the same browser can't reach the API through DNS rebinding.
+func localOnly(addr string, next http.Handler) http.Handler {
+	_, port, _ := net.SplitHostPort(addr)
+	ok := map[string]bool{addr: true, "localhost:" + port: true, "127.0.0.1:" + port: true, "[::1]:" + port: true}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !ok[r.Host] {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *server) api(w http.ResponseWriter, r *http.Request) {
+	// A custom header can't be sent cross-site without a CORS preflight,
+	// which this server never approves.
+	if r.Method != http.MethodPost || r.Header.Get("X-Devshim") != "1" {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	var args []json.RawMessage
 	json.NewDecoder(r.Body).Decode(&args)
 	arg := func(i int, v any) {
@@ -98,15 +123,17 @@ func (s *server) api(w http.ResponseWriter, r *http.Request) {
 	}
 	var res any
 	var err error
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var id int
-	arg(0, &id)
+	var n int // the first argument as a number: a key or an id
+	arg(0, &n)
 	switch strings.TrimPrefix(r.URL.Path, "/api/") {
 	case "Settings":
+		s.mu.Lock()
 		res = s.s
+		s.mu.Unlock()
 	case "SaveSettings":
+		s.mu.Lock()
 		arg(0, &s.s)
+		s.mu.Unlock()
 	case "Version":
 		res = "dev"
 	case "Initial":
@@ -121,32 +148,28 @@ func (s *server) api(w http.ResponseWriter, r *http.Request) {
 	case "Open":
 		var p string
 		arg(0, &p)
-		res, err = s.open(p)
+		res, err = s.docs.Open(p)
 	case "Close":
-		delete(s.docs, id)
+		s.docs.Close(n)
 	case "Reload":
-		if d, ok := s.docs[id]; ok {
-			delete(s.docs, id)
-			res, err = s.open(d.path)
-		}
+		res, err = s.docs.Reload(n)
 	case "ResolveLink":
 		var href string
 		arg(1, &href)
-		if d, ok := s.docs[id]; ok {
-			href = strings.SplitN(href, "#", 2)[0]
-			res = filepath.Join(filepath.Dir(d.path), filepath.FromSlash(href))
-		}
+		res, err = s.docs.Resolve(n, href)
 	case "Chunk":
 		var i int
 		arg(1, &i)
-		if d, ok := s.docs[id]; ok {
-			res, err = d.doc.ChunkHTML(i)
+		var d *doc.Doc
+		if d, err = s.docs.Get(n); err == nil {
+			res, err = d.ChunkHTML(i)
 		}
 	case "Search":
 		var q string
 		arg(1, &q)
-		if d, ok := s.docs[id]; ok {
-			res = d.doc.Search(q)
+		var d *doc.Doc
+		if d, err = s.docs.Get(n); err == nil {
+			res = d.Search(q)
 		}
 	}
 	out := map[string]any{"result": res}
@@ -154,20 +177,4 @@ func (s *server) api(w http.ResponseWriter, r *http.Request) {
 		out["error"] = err.Error()
 	}
 	json.NewEncoder(w).Encode(out)
-}
-
-func (s *server) open(p string) (any, error) {
-	abs, _ := filepath.Abs(p)
-	d, err := doc.Load(abs)
-	if err != nil {
-		return nil, err
-	}
-	s.next++
-	s.docs[s.next] = &openDoc{doc: d, path: abs}
-	return map[string]any{
-		"id": s.next, "path": abs, "name": filepath.Base(abs),
-		"base": "/local" + filepath.ToSlash(filepath.Dir(abs)) + "/",
-		"size": len(d.Source), "parseMs": float64(d.ParseTime.Microseconds()) / 1000,
-		"chunks": d.Chunks, "headings": d.Headings, "anchors": d.Anchors,
-	}, nil
 }

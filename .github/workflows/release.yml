@@ -5,8 +5,10 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# Read only by default; the release job gets what it needs. Actions are
+# pinned to commits, so a moved tag can't change what runs.
 permissions:
-  contents: write
+  contents: read
 
 env:
   WAILS_VERSION: v2.16.0
@@ -29,9 +31,11 @@ jobs:
             platform: darwin/universal
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
 
@@ -42,7 +46,7 @@ jobs:
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
 
       - name: Install Wails
-        run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
+        run: go install "github.com/wailsapp/wails/v2/cmd/wails@$WAILS_VERSION"
 
       - name: Test
         if: matrix.name == 'linux'
@@ -58,17 +62,23 @@ jobs:
 
       - name: Build
         shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          TAGS: ${{ matrix.tags }}
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
-          wails build -platform ${{ matrix.platform }} -trimpath \
-            ${{ matrix.tags && format('-tags {0}', matrix.tags) || '' }} \
-            -ldflags "-s -w -X main.version=${{ steps.ver.outputs.version }}"
+          wails build -platform "$PLATFORM" -trimpath ${TAGS:+-tags "$TAGS"} \
+            -ldflags "-s -w -X main.version=$VERSION"
 
       - name: Package
         shell: bash
+        env:
+          NAME: ${{ matrix.name }}
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
-          v=${{ steps.ver.outputs.version }}
+          v=$VERSION
           mkdir -p dist
-          case "${{ matrix.name }}" in
+          case "$NAME" in
             windows) cp build/bin/md-viewer.exe "dist/md-viewer-$v-windows-amd64.exe" ;;
             linux)   tar -C build/bin -czf "dist/md-viewer-$v-linux-amd64.tar.gz" md-viewer ;;
             macos)
@@ -77,7 +87,7 @@ jobs:
           esac
           ls -l dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.name }}
           path: dist/*
@@ -86,14 +96,24 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write     # publish the release
+      id-token: write     # sign the build provenance
+      attestations: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           merge-multiple: true
 
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      # Lets anyone check a download was built here from this repository:
+      #   gh attestation verify <file> --repo <owner>/<repo>
+      - uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: dist/md-viewer-*
 
       - name: Publish release
         env:

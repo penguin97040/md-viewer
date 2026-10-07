@@ -56,8 +56,9 @@ export class Viewer {
     return (c.bytes / m.perLine + c.lines * 0.45) * m.lh;
   }
 
-  // load shows a document. With an anchor (from anchor()), the reading
-  // position is restored, e.g. after a live reload.
+  // load shows a document, resolving false if it didn't. With an anchor
+  // (from anchor()), the reading position is restored, e.g. after a live
+  // reload.
   async load(info, anchor) {
     const gen = ++this.gen;
     const n = info.chunks.length;
@@ -68,7 +69,9 @@ export class Viewer {
     await Promise.all([start, start + 1, start + 2].filter((i) => i < n).map(async (i) => {
       try { pre.set(i, await this.fetchChunk(info.id, i)); } catch { /* mounted later */ }
     }));
-    if (gen !== this.gen) return false;
+    // Superseded, or the tab was hidden meanwhile (it can't be measured
+    // now); the caller loads it again when shown.
+    if (gen !== this.gen || this.paused) return false;
 
     this.mountObs.disconnect();
     this.keepObs.disconnect();
@@ -289,9 +292,11 @@ export class Viewer {
 
   // mountAll renders the whole document (for printing) and keeps it mounted
   // until resumeUnmount. onProgress gets the fraction done; returning false
-  // stops early. It resolves true when everything is mounted.
+  // stops early, as do hiding the tab and loading another parse. It
+  // resolves true only when every chunk is mounted.
   async mountAll(onProgress) {
     this.holding = true;
+    const gen = this.gen;
     const todo = this.chunks.filter((c) => c.state !== 'mounted').map((c) => c.i);
     const total = this.chunks.length;
     let done = total - todo.length;
@@ -300,11 +305,11 @@ export class Viewer {
     const worker = async () => {
       while (!stopped && next < todo.length) {
         await this.mount(todo[next++]);
-        if (onProgress?.(++done / total) === false) stopped = true;
+        if (this.paused || gen !== this.gen || onProgress?.(++done / total) === false) stopped = true;
       }
     };
     await Promise.all(Array.from({ length: 6 }, worker));
-    return !stopped;
+    return !stopped && gen === this.gen && this.chunks.every((c) => c.state === 'mounted');
   }
 
   // resumeUnmount ends mountAll, emptying chunks far from the view again.

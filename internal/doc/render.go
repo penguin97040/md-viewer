@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
@@ -18,7 +19,9 @@ import (
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/renderer"
 	"github.com/yuin/goldmark/renderer/html"
+	"github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
+	xhtml "golang.org/x/net/html"
 
 	"github.com/gohugoio/hugo-goldmark-extensions/passthrough"
 )
@@ -37,7 +40,10 @@ var markdown = goldmark.New(
 			BlockDelimiters:  []passthrough.Delimiters{{Open: "$$", Close: "$$"}, {Open: `\[`, Close: `\]`}},
 		}),
 	),
-	goldmark.WithParserOptions(parser.WithAttribute()),
+	goldmark.WithParserOptions(
+		parser.WithAttribute(),
+		parser.WithASTTransformers(util.Prioritized(headingAttrs{}, 1000)),
+	),
 	goldmark.WithRendererOptions(
 		html.WithUnsafe(), // raw HTML is kept, then sanitised
 		renderer.WithNodeRenderers(util.Prioritized(&nodeRenderer{}, 1)),
@@ -52,6 +58,93 @@ func (r *nodeRenderer) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
 	reg.Register(ast.KindCodeBlock, r.indented)
 	reg.Register(passthrough.KindPassthroughInline, r.mathInline)
 	reg.Register(passthrough.KindPassthroughBlock, r.mathBlock)
+	reg.Register(ast.KindHTMLBlock, r.htmlBlock)
+	reg.Register(ast.KindRawHTML, r.rawHTML)
+}
+
+// headingAttrs keeps only the id from heading attributes ({#id .class}),
+// so a document can't give its headings the viewer's own classes.
+type headingAttrs struct{}
+
+func (headingAttrs) Transform(doc *ast.Document, _ text.Reader, _ parser.Context) {
+	walkHeadings(doc, func(h *ast.Heading) {
+		id, ok := h.AttributeString("id")
+		h.RemoveAttributes()
+		if ok {
+			h.SetAttributeString("id", id)
+		}
+	})
+}
+
+// htmlBlock and rawHTML write a document's own HTML without class
+// attributes. The viewer gives meaning to its classes (a hidden print copy,
+// the code block a copy button copies), so a document borrowing them could
+// show one thing and copy another. The sanitiser removes the rest.
+func (r *nodeRenderer) htmlBlock(w util.BufWriter, src []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+	if !entering {
+		return ast.WalkContinue, nil
+	}
+	n := node.(*ast.HTMLBlock)
+	var b []byte
+	for i := 0; i < n.Lines().Len(); i++ {
+		line := n.Lines().At(i)
+		b = append(b, line.Value(src)...)
+	}
+	if n.HasClosure() {
+		b = append(b, n.ClosureLine.Value(src)...)
+	}
+	w.Write(stripClasses(b))
+	return ast.WalkSkipChildren, nil
+}
+
+func (r *nodeRenderer) rawHTML(w util.BufWriter, src []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+	if !entering {
+		return ast.WalkSkipChildren, nil
+	}
+	n := node.(*ast.RawHTML)
+	var b []byte
+	for i := 0; i < n.Segments.Len(); i++ {
+		seg := n.Segments.At(i)
+		b = append(b, seg.Value(src)...)
+	}
+	w.Write(stripClasses(b))
+	return ast.WalkSkipChildren, nil
+}
+
+// stripClasses removes class attributes from tags in raw HTML, leaving
+// everything else byte for byte. A tag left unfinished at the end is
+// escaped, so it can't join up with what follows.
+func stripClasses(b []byte) []byte {
+	if !bytes.Contains(bytes.ToLower(b), []byte("class")) {
+		return b
+	}
+	z := xhtml.NewTokenizer(bytes.NewReader(b))
+	var out bytes.Buffer
+	for {
+		tt := z.Next()
+		raw := z.Raw()
+		switch tt {
+		case xhtml.ErrorToken:
+			out.WriteString(xhtml.EscapeString(string(raw)))
+			return out.Bytes()
+		case xhtml.StartTagToken, xhtml.SelfClosingTagToken:
+			t := z.Token()
+			kept := t.Attr[:0]
+			for _, a := range t.Attr {
+				if a.Key != "class" {
+					kept = append(kept, a)
+				}
+			}
+			if len(kept) == len(t.Attr) {
+				out.Write(raw)
+				continue
+			}
+			t.Attr = kept
+			out.WriteString(t.String())
+		default:
+			out.Write(raw)
+		}
+	}
 }
 
 func (r *nodeRenderer) fenced(w util.BufWriter, src []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
@@ -94,8 +187,14 @@ func writeCode(w util.BufWriter, lang string, code []byte) {
 	w.WriteString("</code></pre></div>\n")
 }
 
+// highlightBudget bounds the time spent highlighting one code block. Some
+// lexers' patterns backtrack badly on unusual text (minutes for a few
+// hundred KB), so a block that runs over is shown plain instead.
+const highlightBudget = time.Second
+
 // highlight writes tokens as <span class="..."> using chroma's short class
-// names. It returns false when the language is unknown.
+// names. It returns false, having written nothing, when the language is
+// unknown or highlighting takes too long.
 func highlight(w util.BufWriter, lang string, code []byte) bool {
 	if lang == "" || len(code) > maxHighlightBytes {
 		return false
@@ -108,18 +207,24 @@ func highlight(w util.BufWriter, lang string, code []byte) bool {
 	if err != nil {
 		return false
 	}
+	deadline := time.Now().Add(highlightBudget)
+	var b bytes.Buffer
 	for tok := it(); tok != chroma.EOF; tok = it() {
+		if time.Now().After(deadline) {
+			return false
+		}
 		cls := tokenClass(tok.Type)
 		if cls != "" {
-			w.WriteString(`<span class="`)
-			w.WriteString(cls)
-			w.WriteString(`">`)
+			b.WriteString(`<span class="`)
+			b.WriteString(cls)
+			b.WriteString(`">`)
 		}
-		w.Write(util.EscapeHTML([]byte(tok.Value)))
+		b.Write(util.EscapeHTML([]byte(tok.Value)))
 		if cls != "" {
-			w.WriteString("</span>")
+			b.WriteString("</span>")
 		}
 	}
+	w.Write(b.Bytes())
 	return true
 }
 
@@ -195,7 +300,79 @@ var policy = func() *bluemonday.Policy {
 }()
 
 func sanitise(b []byte) string {
-	return string(policy.SanitizeBytes(b))
+	return holdWebImages(policy.SanitizeBytes(b))
+}
+
+// holdWebImages moves image addresses on the web into data-web-src and
+// data-web-srcset, so nothing is fetched until the reader agrees: loading an
+// image tells its site that the file was opened, and from where. It runs on
+// sanitised HTML, which is well formed.
+func holdWebImages(b []byte) string {
+	if !bytes.Contains(b, []byte("<img")) && !bytes.Contains(b, []byte("<source")) {
+		return string(b)
+	}
+	z := xhtml.NewTokenizer(bytes.NewReader(b))
+	var out strings.Builder
+	for {
+		tt := z.Next()
+		raw := z.Raw()
+		if tt == xhtml.ErrorToken {
+			out.Write(raw)
+			return out.String()
+		}
+		if tt != xhtml.StartTagToken && tt != xhtml.SelfClosingTagToken {
+			out.Write(raw)
+			continue
+		}
+		t := z.Token()
+		if t.Data != "img" && t.Data != "source" {
+			out.Write(raw)
+			continue
+		}
+		held := false
+		for i, a := range t.Attr {
+			if (a.Key == "src" && isWebURL(a.Val)) || (a.Key == "srcset" && webSrcset(a.Val)) {
+				t.Attr[i].Key = "data-web-" + a.Key
+				held = true
+			}
+		}
+		if held {
+			out.WriteString(t.String())
+		} else {
+			out.Write(raw)
+		}
+	}
+}
+
+// isWebURL reports whether an image address points at another computer:
+// http, https or protocol-relative (//host/...). It reads the address the
+// way a browser does: tabs and newlines are ignored, leading spaces and
+// control characters are dropped, and \ counts as /.
+func isWebURL(u string) bool {
+	u = strings.Map(func(r rune) rune {
+		switch r {
+		case '\t', '\n', '\r':
+			return -1
+		case '\\':
+			return '/'
+		}
+		return r
+	}, u)
+	u = strings.TrimLeft(u, "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f ")
+	if strings.HasPrefix(u, "//") {
+		return true
+	}
+	scheme, _, ok := strings.Cut(u, ":")
+	return ok && (strings.EqualFold(scheme, "http") || strings.EqualFold(scheme, "https"))
+}
+
+func webSrcset(v string) bool {
+	for _, c := range strings.Split(v, ",") {
+		if f := strings.Fields(c); len(f) > 0 && isWebURL(f[0]) {
+			return true
+		}
+	}
+	return false
 }
 
 var (
