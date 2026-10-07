@@ -2,7 +2,7 @@
 // chunk holding the current match is mounted and its matches highlighted.
 
 const HAS_HIGHLIGHT = typeof CSS !== 'undefined' && 'highlights' in CSS && typeof Highlight !== 'undefined';
-const SKIP = 'pre.mermaid, .diagram, .math, .katex, a.footnote-ref, a.footnote-backref, script, style';
+const SKIP = 'pre.mermaid, .diagram, .math, .katex, a.footnote-ref, a.footnote-backref, button, script, style';
 
 // foldedText walks the text of root, lower-cased with whitespace collapsed
 // (matching Go's foldText), and maps each folded character back to its
@@ -59,8 +59,9 @@ function rangesIn(root, q) {
 }
 
 export class Find {
-  constructor({ bar, input, count, prev, next, close }, { viewer, search, docId }) {
-    Object.assign(this, { bar, input, countEl: count, viewer, search, docId });
+  constructor({ bar, input, count, prev, next, close }, { viewer, search }) {
+    Object.assign(this, { bar, input, countEl: count, search });
+    this.getViewer = viewer; // the active tab's viewer, or null
     this.q = '';
     this.counts = [];
     this.total = 0;
@@ -86,6 +87,10 @@ export class Find {
     close.addEventListener('click', () => this.close());
   }
 
+  get viewer() {
+    return this.getViewer();
+  }
+
   get isOpen() {
     return !this.bar.hidden;
   }
@@ -107,7 +112,7 @@ export class Find {
     this.total = 0;
     this.pos = -1;
     this.countEl.textContent = '';
-    this.viewer.sc.focus();
+    this.viewer?.sc.focus();
   }
 
   // reset is called when the document changes.
@@ -122,7 +127,8 @@ export class Find {
     const gen = ++this.gen;
     this.q = q;
     this.clearMarks();
-    if (!q || !this.viewer.info) {
+    const viewer = this.viewer;
+    if (!q || !viewer?.info) {
       this.counts = [];
       this.total = 0;
       this.pos = -1;
@@ -131,7 +137,7 @@ export class Find {
     }
     let counts;
     try {
-      counts = await this.search(this.docId(), q);
+      counts = await this.search(viewer.info.id, q);
     } catch {
       return;
     }
@@ -144,11 +150,11 @@ export class Find {
       return;
     }
     // Start from the first match at or after the top of the view.
-    const sc = this.viewer.sc;
-    const here = this.viewer.chunkAt(sc.scrollTop);
+    const sc = viewer.sc;
+    const here = viewer.chunkAt(sc.scrollTop);
     let k = 0;
     for (let i = 0; i < here; i++) k += counts[i];
-    const c = this.viewer.chunks[here];
+    const c = viewer.chunks[here];
     if (c?.state === 'mounted' && counts[here]) {
       const top = sc.getBoundingClientRect().top;
       const ranges = rangesIn(c.el, q);
@@ -174,8 +180,10 @@ export class Find {
     const gen = this.gen;
     this.pos = k;
     let [ci, nth] = this.locate(k);
-    const el = await this.viewer.ensure(ci);
-    if (gen !== this.gen || !el) return;
+    const viewer = this.viewer;
+    if (!viewer) return;
+    const el = await viewer.ensure(ci);
+    if (gen !== this.gen || !el || viewer !== this.viewer) return;
     const ranges = rangesIn(el, this.q);
     // Go's count can differ slightly from the DOM (e.g. raw HTML), so trust
     // the DOM once the chunk is on screen.

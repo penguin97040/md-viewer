@@ -3,10 +3,14 @@
 A small, fast markdown viewer for Windows, macOS and Linux. It's a single
 executable with no installer and no runtime to set up.
 
+- Tabs: open several files at once; opening another file from Explorer or
+  Finder adds a tab to the window that's already open
 - Dark mode by default, with a light theme
 - GitHub-flavoured markdown: tables, task lists, footnotes, strikethrough,
   autolinks, definition lists and raw HTML (sanitised)
-- Syntax highlighting for fenced code blocks
+- Syntax highlighting for fenced code blocks, with a one-click copy button
+- Sortable tables: click a column heading to sort it
+- Save as PDF or print, always in light colours
 - Mermaid diagrams and KaTeX maths, drawn in the app (no internet needed)
 - Table of contents sidebar that follows your place in the document
 - Find in document, including parts of large files not yet on screen
@@ -15,7 +19,7 @@ executable with no installer and no runtime to set up.
 - Word wrap for code blocks and tables, which can be turned off
 - Handles large files (tested to 25 MB) by rendering only what's near the
   screen
-- Opens local `.md` links in the viewer; web links open in your browser
+- Opens local `.md` links in a new tab; web links open in your browser
 
 ## Download
 
@@ -29,25 +33,42 @@ Get the latest build from the [Releases](../../releases) page.
 
 ## Usage
 
-Open a file with **Open** (Ctrl+O), by dropping it on the window, or from the
-command line:
+Open files with **Open** (Ctrl+O), by dropping them on the window, or from the
+command line. Each file gets its own tab:
 
 ```
-md-viewer path/to/file.md
+md-viewer notes.md README.md
 ```
 
 To make it the default app for `.md` files on Windows, right-click a markdown
 file, choose **Open with › Choose another app**, browse to `md-viewer.exe` and
 tick **Always use this app**.
 
+### Saving as PDF
+
+Click the printer button (Ctrl+P). MD Viewer renders the whole document and
+opens the system print dialog. To get a PDF, choose:
+
+- **Save as PDF** as the destination on Windows,
+- **PDF › Save as PDF** on macOS,
+- **Print to File** on Linux.
+
+The PDF uses light colours whatever theme you're using. Very large files can
+take a while to prepare, and you can cancel this.
+
 ### Keyboard shortcuts
 
-On macOS, use ⌘ in place of Ctrl.
+On macOS, use ⌘ in place of Ctrl (except for Ctrl+Tab, which is the same on
+every platform).
 
 | Action | Shortcut |
 |---|---|
-| Open file | Ctrl+O |
+| Open file (new tab) | Ctrl+O |
+| Close tab | Ctrl+W, or middle-click the tab |
+| Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab (or Ctrl+PgDn / Ctrl+PgUp) |
+| Go to tab 1–8 / last tab | Ctrl+1 … Ctrl+8 / Ctrl+9 |
 | Reload | F5 or Ctrl+R |
+| Save as PDF / print | Ctrl+P |
 | Table of contents | Ctrl+B |
 | Find | Ctrl+F, then Enter / Shift+Enter (or F3 / Shift+F3) |
 | Larger / smaller text | Ctrl+= / Ctrl+- or Ctrl+mouse wheel |

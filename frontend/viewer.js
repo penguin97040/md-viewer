@@ -24,6 +24,8 @@ export class Viewer {
     this.gen = 0;
     this.sumEst = 0;
     this.sumReal = 0;
+    this.paused = false;  // hidden tab: ignore observer noise
+    this.holding = false; // printing: keep everything mounted
 
     this.mountObs = new IntersectionObserver((es) => {
       for (const e of es) if (e.isIntersecting) this.mount(+e.target.dataset.i);
@@ -126,6 +128,10 @@ export class Viewer {
     const gen = this.gen;
     c.promise = this.fetchChunk(this.info.id, i).then((html) => {
       if (gen !== this.gen || c.state !== 'loading') return;
+      if (this.paused) {
+        c.state = 'empty'; // tab hidden meanwhile; it can't be measured now
+        return;
+      }
       this.mountHTML(c, html);
     }, () => {
       if (c.state === 'loading') c.state = 'empty';
@@ -152,6 +158,7 @@ export class Viewer {
   }
 
   unmount(i) {
+    if (this.paused || this.holding) return;
     const c = this.chunks[i];
     if (!c || c.state !== 'mounted' || !this.big) {
       if (c && c.state === 'loading') c.state = 'empty';
@@ -171,6 +178,7 @@ export class Viewer {
   }
 
   onResize(entries) {
+    if (this.paused) return;
     for (const e of entries) {
       const c = this.chunks[+e.target.dataset.i];
       if (!c || c.state !== 'mounted' || c.el !== e.target) continue;
@@ -271,5 +279,44 @@ export class Viewer {
 
   mounted() {
     return this.chunks.filter((c) => c.state === 'mounted');
+  }
+
+  // setActive pauses the viewer while its tab is hidden, when every element
+  // measures zero and would otherwise be unmounted or mis-measured.
+  setActive(on) {
+    this.paused = !on;
+  }
+
+  // mountAll renders the whole document (for printing) and keeps it mounted
+  // until resumeUnmount. onProgress gets the fraction done; returning false
+  // stops early. It resolves true when everything is mounted.
+  async mountAll(onProgress) {
+    this.holding = true;
+    const todo = this.chunks.filter((c) => c.state !== 'mounted').map((c) => c.i);
+    const total = this.chunks.length;
+    let done = total - todo.length;
+    let next = 0;
+    let stopped = false;
+    const worker = async () => {
+      while (!stopped && next < todo.length) {
+        await this.mount(todo[next++]);
+        if (onProgress?.(++done / total) === false) stopped = true;
+      }
+    };
+    await Promise.all(Array.from({ length: 6 }, worker));
+    return !stopped;
+  }
+
+  // resumeUnmount ends mountAll, emptying chunks far from the view again.
+  resumeUnmount() {
+    this.holding = false;
+    if (!this.big) return;
+    const top = this.sc.scrollTop;
+    const h = this.sc.clientHeight;
+    for (const c of this.chunks) {
+      if (c.state !== 'mounted') continue;
+      const y = c.el.offsetTop;
+      if (y + c.el.offsetHeight < top - 6 * h || y > top + 7 * h) this.unmount(c.i);
+    }
   }
 }

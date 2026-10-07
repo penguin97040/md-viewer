@@ -88,7 +88,7 @@ func TestRendering(t *testing.T) {
 	html := render(t, d)
 	for _, want := range []string{
 		`<pre class="mermaid">graph TD; A--&gt;B`,
-		`<code class="hl language-go"><span class="kd">func</span>`,
+		`<div class="code"><pre><code class="hl language-go"><span class="kd">func</span>`,
 		`<span class="math">x^2</span>`,
 		`costs $5 and $10`,
 		`<div class="math display">`,
@@ -122,8 +122,14 @@ func TestSearch(t *testing.T) {
 
 func TestHighlightCSS(t *testing.T) {
 	css := HighlightCSS()
-	if !strings.Contains(css, "[data-theme=dark] .hl .k{") || !strings.Contains(css, "[data-theme=light] .hl .k{") {
+	if !strings.Contains(css, "[data-theme=dark] .hl .k{") || !strings.Contains(css, "[data-theme=light] .hl .k{") ||
+		!strings.Contains(css, "@media print{") || !strings.Contains(css, "[data-theme] .hl .k{") {
 		t.Errorf("unexpected css: %.200s", css)
+	}
+	// Name tokens have no colour in the light style, so print must reset
+	// them or the dark theme's near-white would print on white paper.
+	if !strings.Contains(css[strings.Index(css, "@media print"):], "[data-theme] .hl .n{color:inherit") {
+		t.Error("print css does not reset plain tokens")
 	}
 }
 

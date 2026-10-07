@@ -2,7 +2,7 @@
 // UI work and automated checks, without building the desktop app. A small
 // shim stands in for the Wails bindings and calls a JSON API here instead.
 //
-//	go run ./cmd/devserver [-addr :8080] [file.md]
+//	go run ./cmd/devserver [-addr :8080] [file.md ...]
 package main
 
 import (
@@ -23,7 +23,10 @@ import (
 )
 
 const shim = `
-window.runtime = { EventsOn() {}, EventsOff() {}, OnFileDrop() {} };
+window.runtime = {
+  EventsOn() {}, EventsOff() {}, OnFileDrop() {},
+  ClipboardSetText: (t) => navigator.clipboard.writeText(t).then(() => true, () => false),
+};
 const call = (m) => async (...args) => {
   const r = await fetch('/api/' + m, { method: 'POST', body: JSON.stringify(args) });
   const j = await r.json();
@@ -33,19 +36,23 @@ const call = (m) => async (...args) => {
 window.go = { main: { App: new Proxy({}, { get: (_, m) => call(m) }) } };
 `
 
+type openDoc struct {
+	doc  *doc.Doc
+	path string
+}
+
 type server struct {
 	mu    sync.Mutex
-	doc   *doc.Doc
-	id    int
-	path  string
-	start string
+	docs  map[int]*openDoc
+	next  int
+	start []string
 	s     settings.Settings
 }
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "listen address")
 	flag.Parse()
-	srv := &server{start: flag.Arg(0), s: settings.Defaults()}
+	srv := &server{docs: map[int]*openDoc{}, start: flag.Args(), s: settings.Defaults()}
 	front := http.FileServer(http.Dir("frontend"))
 
 	http.HandleFunc("/api/", srv.api)
@@ -93,6 +100,8 @@ func (s *server) api(w http.ResponseWriter, r *http.Request) {
 	var err error
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var id int
+	arg(0, &id)
 	switch strings.TrimPrefix(r.URL.Path, "/api/") {
 	case "Settings":
 		res = s.s
@@ -101,28 +110,44 @@ func (s *server) api(w http.ResponseWriter, r *http.Request) {
 	case "Version":
 		res = "dev"
 	case "Initial":
-		if s.start != "" {
-			res, err = s.open(s.start)
+		var paths []string
+		for _, p := range s.start {
+			abs, _ := filepath.Abs(p)
+			paths = append(paths, abs)
 		}
+		res = paths
+	case "PickFile", "SetTitle", "Print", "OpenURL":
+		res = ""
 	case "Open":
 		var p string
 		arg(0, &p)
 		res, err = s.open(p)
-	case "OpenLink":
-		var p string
-		arg(0, &p)
-		res, err = s.open(filepath.Join(filepath.Dir(s.path), filepath.FromSlash(p)))
+	case "Close":
+		delete(s.docs, id)
 	case "Reload":
-		res, err = s.open(s.path)
+		if d, ok := s.docs[id]; ok {
+			delete(s.docs, id)
+			res, err = s.open(d.path)
+		}
+	case "ResolveLink":
+		var href string
+		arg(1, &href)
+		if d, ok := s.docs[id]; ok {
+			href = strings.SplitN(href, "#", 2)[0]
+			res = filepath.Join(filepath.Dir(d.path), filepath.FromSlash(href))
+		}
 	case "Chunk":
-		var id, i int
-		arg(0, &id)
+		var i int
 		arg(1, &i)
-		res, err = s.doc.ChunkHTML(i)
+		if d, ok := s.docs[id]; ok {
+			res, err = d.doc.ChunkHTML(i)
+		}
 	case "Search":
 		var q string
 		arg(1, &q)
-		res = s.doc.Search(q)
+		if d, ok := s.docs[id]; ok {
+			res = d.doc.Search(q)
+		}
 	}
 	out := map[string]any{"result": res}
 	if err != nil {
@@ -137,10 +162,10 @@ func (s *server) open(p string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.doc, s.path = d, abs
-	s.id++
+	s.next++
+	s.docs[s.next] = &openDoc{doc: d, path: abs}
 	return map[string]any{
-		"id": s.id, "path": abs, "name": filepath.Base(abs),
+		"id": s.next, "path": abs, "name": filepath.Base(abs),
 		"base": "/local" + filepath.ToSlash(filepath.Dir(abs)) + "/",
 		"size": len(d.Source), "parseMs": float64(d.ParseTime.Microseconds()) / 1000,
 		"chunks": d.Chunks, "headings": d.Headings, "anchors": d.Anchors,

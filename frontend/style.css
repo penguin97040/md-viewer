@@ -74,16 +74,65 @@ button { font: inherit; color: inherit; }
   user-select: none;
 }
 
-#title {
+/* Tabs */
+#tabs {
   flex: 1;
   min-width: 0;
-  text-align: center;
+  display: flex;
+  align-items: flex-end;
+  align-self: stretch;
+  gap: 2px;
+  padding: 0 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+#tabs::-webkit-scrollbar { display: none; }
+.tab {
+  flex: 0 1 200px;
+  min-width: 90px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px 0 12px;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0;
   color: var(--muted);
+  cursor: default;
+}
+.tab:hover { background: var(--bg-hover); color: var(--text); }
+.tab.active {
+  background: var(--bg);
+  border-color: var(--border);
+  color: var(--text-strong);
+  margin-bottom: -1px;
+  height: 33px;
+}
+.tab .name {
+  flex: 1;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  padding: 0 8px;
 }
+.tab .x {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0;
+}
+.tab:hover .x, .tab.active .x { opacity: .7; }
+.tab .x:hover { opacity: 1; background: var(--bg-hover); }
+.tab .x svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
 
 .icon {
   display: inline-grid;
@@ -241,13 +290,18 @@ main {
 .toc-item.l1 { color: var(--text); font-weight: 600; }
 .toc-empty { padding: 14px 16px; color: var(--muted); font-size: 13px; }
 
-#scroller {
+#docs {
   flex: 1;
   min-width: 0;
   position: relative;
+}
+.scroller {
+  position: relative;
+  height: 100%;
   overflow-y: auto;
   outline: none;
 }
+.scroller[hidden] { display: none; }
 
 #empty {
   height: 100%;
@@ -284,7 +338,7 @@ body.has-doc #empty { display: none; }
 }
 #toast[hidden] { display: none; }
 
-body.dragging #scroller { outline: 2px dashed var(--accent); outline-offset: -8px; }
+body.dragging #docs { outline: 2px dashed var(--accent); outline-offset: -8px; }
 
 /* Scrollbars */
 ::-webkit-scrollbar { width: 12px; height: 12px; }
@@ -395,7 +449,37 @@ body:not(.has-doc) .md { display: none; }
 .md .footnotes { font-size: .9em; color: var(--muted); }
 .md .footnotes hr { margin: 2.5em 0 1.2em; }
 
+.md .code { position: relative; }
+.md .copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-soft);
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .12s;
+}
+.md .code:hover .copy, .md .copy:focus-visible, .md .copy.done { opacity: 1; }
+.md .copy:hover { color: var(--text-strong); }
+.md .copy.done { color: #3fb950; }
+.md .copy svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+@media (hover: none) { .md .copy { opacity: .6; } }
+
+.md th.sortable { cursor: pointer; user-select: none; }
+.md th.sortable:hover { background: var(--bg-hover); }
+.md th[aria-sort]::after { content: " ▲"; font-size: .7em; color: var(--accent); vertical-align: .15em; }
+.md th[aria-sort=descending]::after { content: " ▼"; }
+
 .md pre.mermaid { color: var(--muted); }
+.md .diagram-print { display: none; }
 .md .diagram { margin: 0 0 1em; text-align: center; overflow-x: auto; }
 .md .diagram svg { max-width: 100%; height: auto; }
 .md .diagram-error { color: #e5534b; white-space: pre-wrap; font-family: var(--mono); font-size: .85em; text-align: left; }
@@ -406,3 +490,26 @@ body:not(.has-doc) .md { display: none; }
 ::highlight(find) { background-color: var(--mark); }
 ::highlight(find-current) { background-color: var(--mark-current); }
 ::selection { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+
+/* Printing and saving as PDF: light colours, document only. */
+@media print {
+  :root[data-theme] {
+    --bg: #fff; --bg-soft: #f4f5f7; --bg-code: #f5f6f8; --text: #1f2328; --text-strong: #000;
+    --muted: #59636e; --border: #d0d7de; --accent: #0a62c9; --mark: transparent; --mark-current: transparent;
+    color-scheme: light;
+  }
+  @page { margin: 16mm 14mm; }
+  html, body, main, #docs, .scroller { height: auto !important; overflow: visible !important; display: block; background: #fff; }
+  #bar, #toc, #findbar, #settings, #toast, #empty, .scroller[hidden], .md .copy { display: none !important; }
+  .md { max-width: none; padding: 0; font-size: 11pt; }
+  .chunk { height: auto !important; }
+  .md pre, [data-wrap] .md pre { white-space: pre-wrap; overflow: visible; overflow-wrap: anywhere; }
+  [data-wrap] .md table { display: table; width: auto; max-width: 100%; }
+  [data-wrap] .md td, [data-wrap] .md th { white-space: normal; overflow-wrap: anywhere; }
+  .md pre, .md tr, .md img, .md .diagram, .md .math.display, .md blockquote { break-inside: avoid; }
+  .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { break-after: avoid; }
+  .md .diagram.has-print { display: none; }
+  .md .diagram-print { display: block; }
+  .md th[aria-sort]::after { content: none; }
+  .md a { color: var(--accent); }
+}

@@ -30,7 +30,7 @@ func main() {
 	}
 
 	s := settings.Load()
-	app := NewApp(startFile(), s)
+	app := NewApp(fileArgs(os.Args[1:]), s)
 
 	bg := &options.RGBA{R: 0x17, G: 0x19, B: 0x1e, A: 255}
 	winTheme := windows.Dark
@@ -60,6 +60,10 @@ func main() {
 		Windows: &windows.Options{
 			Theme: winTheme,
 		},
+		SingleInstanceLock: &options.SingleInstanceLock{
+			UniqueId:               "io.github.penguin97040.mdviewer",
+			OnSecondInstanceLaunch: app.secondInstance,
+		},
 		Mac: &mac.Options{
 			OnFileOpen: app.openFromOS,
 		},
@@ -72,12 +76,13 @@ func main() {
 	}
 }
 
-// startFile returns the first command line argument that is not a flag.
-func startFile() string {
-	for _, a := range os.Args[1:] {
+// fileArgs returns the command line arguments that are not flags.
+func fileArgs(args []string) []string {
+	var out []string
+	for _, a := range args {
 		if a != "" && !strings.HasPrefix(a, "-") {
-			return a
+			out = append(out, a)
 		}
 	}
-	return ""
+	return out
 }

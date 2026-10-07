@@ -54,6 +54,18 @@ Term
 | Word wrap      | Alt+Z              | Applies to code blocks and tables      |
 | Theme          | Ctrl+Shift+D       | Dark or light                          |
 
+Click a column heading to sort the table; click again to reverse, and a
+third time to restore the original order:
+
+| City         | Population | Area (km²) | Founded |
+|--------------|-----------:|-----------:|--------:|
+| Auckland     |  1,798,300 |      1,086 |    1840 |
+| Wellington   |    215,200 |        290 |    1840 |
+| Christchurch |    396,200 |      1,426 |    1848 |
+| Hamilton     |    185,300 |        110 |    1864 |
+| Dunedin      |    134,100 |      3,314 |    1848 |
+| Tauranga     |    161,800 |        168 |    1838 |
+
 A wide table, to try word wrap:
 
 | Column one | Column two | Column three | Column four | Column five | Column six | Column seven |
@@ -61,6 +73,8 @@ A wide table, to try word wrap:
 | a fairly long cell of text that goes on | another long cell of text for testing | more text here to make it wide | and some more | and more again | nearly there | the end of a very wide row |
 
 ## Code
+
+Hover over a code block and click the copy button in its corner.
 
 ```go
 // Package main says hello.

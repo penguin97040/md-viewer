@@ -78,8 +78,10 @@ func (r *nodeRenderer) indented(w util.BufWriter, src []byte, node ast.Node, ent
 	return ast.WalkSkipChildren, nil
 }
 
+// writeCode writes a code block. The wrapper div holds the copy button, so
+// the button stays put when the block scrolls sideways.
 func writeCode(w util.BufWriter, lang string, code []byte) {
-	w.WriteString("<pre><code")
+	w.WriteString(`<div class="code"><pre><code`)
 	if lang != "" {
 		w.WriteString(` class="hl language-`)
 		w.Write(util.EscapeHTML([]byte(lang)))
@@ -89,7 +91,7 @@ func writeCode(w util.BufWriter, lang string, code []byte) {
 	if !highlight(w, lang, code) {
 		w.Write(util.EscapeHTML(code))
 	}
-	w.WriteString("</code></pre>\n")
+	w.WriteString("</code></pre></div>\n")
 }
 
 // highlight writes tokens as <span class="..."> using chroma's short class
@@ -206,14 +208,21 @@ var (
 func HighlightCSS() string {
 	cssOnce.Do(func() {
 		var b strings.Builder
-		writeStyleCSS(&b, "dark", styles.Get("github-dark"))
-		writeStyleCSS(&b, "light", styles.Get("github"))
+		writeStyleCSS(&b, "[data-theme=dark]", styles.Get("github-dark"), false)
+		writeStyleCSS(&b, "[data-theme=light]", styles.Get("github"), false)
+		// Printing always uses light colours, whatever the theme. Every class
+		// gets a rule so no dark-theme colour survives.
+		b.WriteString("@media print{\n")
+		writeStyleCSS(&b, "[data-theme]", styles.Get("github"), true)
+		b.WriteString("}\n")
 		css = b.String()
 	})
 	return css
 }
 
-func writeStyleCSS(b *strings.Builder, theme string, st *chroma.Style) {
+// writeStyleCSS writes one rule per token class. With complete, classes the
+// style leaves plain are reset to inherit, overriding other themes.
+func writeStyleCSS(b *strings.Builder, scope string, st *chroma.Style, complete bool) {
 	classes := make([]string, 0, len(chroma.StandardTypes))
 	byClass := map[string]chroma.TokenType{}
 	for tt, c := range chroma.StandardTypes {
@@ -230,16 +239,22 @@ func writeStyleCSS(b *strings.Builder, theme string, st *chroma.Style) {
 		var decl []string
 		if e.Colour.IsSet() {
 			decl = append(decl, "color:"+e.Colour.String())
+		} else if complete {
+			decl = append(decl, "color:inherit")
 		}
 		if e.Bold == chroma.Yes {
 			decl = append(decl, "font-weight:600")
+		} else if complete {
+			decl = append(decl, "font-weight:inherit")
 		}
 		if e.Italic == chroma.Yes {
 			decl = append(decl, "font-style:italic")
+		} else if complete {
+			decl = append(decl, "font-style:inherit")
 		}
 		if len(decl) == 0 {
 			continue
 		}
-		fmt.Fprintf(b, "[data-theme=%s] .hl .%s{%s}\n", theme, c, strings.Join(decl, ";"))
+		fmt.Fprintf(b, "%s .hl .%s{%s}\n", scope, c, strings.Join(decl, ";"))
 	}
 }
