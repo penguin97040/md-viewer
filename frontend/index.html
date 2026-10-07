@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en-NZ" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MD Viewer</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/highlight.css">
+<base id="base" href="/">
+</head>
+<body>
+<header id="bar">
+  <button id="btn-toc" class="icon" title="Contents (Ctrl+B)" aria-label="Contents">
+    <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h13"/></svg>
+  </button>
+  <button id="btn-open" class="icon" title="Open (Ctrl+O)" aria-label="Open">
+    <svg viewBox="0 0 24 24"><path d="M3 7.5V18a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9.5a2 2 0 0 0-2-2h-7l-2-2.5H5a2 2 0 0 0-2 2z"/></svg>
+  </button>
+  <button id="btn-reload" class="icon" title="Reload (F5)" aria-label="Reload">
+    <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg>
+  </button>
+  <div id="title"></div>
+  <button id="btn-find" class="icon" title="Find (Ctrl+F)" aria-label="Find">
+    <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
+  </button>
+  <button id="btn-settings" class="icon" title="Settings" aria-label="Settings">
+    <svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+  </button>
+</header>
+
+<div id="findbar" hidden>
+  <input id="find-input" type="text" placeholder="Find" spellcheck="false" autocomplete="off">
+  <span id="find-count"></span>
+  <button id="find-prev" class="icon small" title="Previous (Shift+Enter)" aria-label="Previous">
+    <svg viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></svg>
+  </button>
+  <button id="find-next" class="icon small" title="Next (Enter)" aria-label="Next">
+    <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+  </button>
+  <button id="find-close" class="icon small" title="Close (Esc)" aria-label="Close">
+    <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>
+  </button>
+</div>
+
+<div id="settings" class="popover" hidden>
+  <div class="row"><span>Theme</span>
+    <div class="seg" data-key="theme"><button data-v="dark">Dark</button><button data-v="light">Light</button></div></div>
+  <div class="row"><span>Font</span>
+    <div class="seg" data-key="font"><button data-v="sans">Sans</button><button data-v="serif">Serif</button></div></div>
+  <div class="row"><span>Width</span>
+    <div class="seg" data-key="width"><button data-v="narrow">Narrow</button><button data-v="medium">Medium</button><button data-v="full">Full</button></div></div>
+  <div class="row"><span>Font size</span>
+    <div class="step" data-key="fontSize" data-step="1"><button data-d="-1">−</button><output></output><button data-d="1">+</button></div></div>
+  <div class="row"><span>Line spacing</span>
+    <div class="step" data-key="lineHeight" data-step="0.05"><button data-d="-1">−</button><output></output><button data-d="1">+</button></div></div>
+  <label class="row"><span>Wrap code and tables</span><input type="checkbox" data-key="wrap"></label>
+  <label class="row"><span>Live reload</span><input type="checkbox" data-key="liveReload"></label>
+  <div class="foot"><span id="version"></span><button id="reset" class="link">Reset</button></div>
+</div>
+
+<main>
+  <nav id="toc" hidden><div id="toc-inner"></div></nav>
+  <div id="scroller" tabindex="-1">
+    <article id="doc" class="md"></article>
+    <div id="empty">
+      <p>Open a markdown file, or drop one here.</p>
+      <button id="empty-open">Open file…</button>
+      <p class="hint">Ctrl+O</p>
+    </div>
+  </div>
+</main>
+<div id="toast" hidden></div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+# Build output
+build/bin/
+build/wailsjs/
+frontend/wailsjs/
+
+# Generated test files
+testdata/big*.md
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
