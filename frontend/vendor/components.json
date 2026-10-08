@@ -3,9 +3,10 @@
   "dompurify": "3.4.16",
   "katex": "0.19.0",
   "esbuild": "0.28.2",
-  "lockSHA256": "82525d4b1d1c0cf5e03ccc58d8b433cd143ececfa34099110766bf548958b186",
-  "mermaidSHA256": "e7e59b2901a1b84d25f76c991a69b4d2b234774dce2493d62a8cfdee20abcccc",
-  "katexSHA256": "ce2065f119895b4de39124b76321aa896c22a2ef9c0bd775c5856f43fa36c81c",
+  "fflate": "0.8.3",
+  "lockSHA256": "935041d36cae1879415d7d6bc93bf1e7efbb1504ce5e34da882f974e0c2b4259",
+  "mermaidSHA256": "38daa374b33e4f2b3ce843956ba33ee4095ae7a64c9bf043dc7a14286b365871",
+  "katexSHA256": "ac05803c32b300ddd14c459714918088bd7780a4d77baaf202d3f912cce710dd",
   "bundledPackages": [
     "@braintree/sanitize-url@7.1.2",
     "@chevrotain/cst-dts-gen@13.2.0",

@@ -3,11 +3,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
-import { gzipSync } from 'node:zlib';
 
 const root = path.resolve(process.argv[2]);
 const require = createRequire(path.join(root, 'package.json'));
 const { build } = require('esbuild');
+// Pure JavaScript compression avoids differences between system and bundled zlib.
+const { gzipSync } = require('fflate');
 const output = path.join(root, 'output');
 const modules = path.join(root, 'node_modules');
 const manifest = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'));
@@ -67,8 +68,8 @@ for (const [key, { dir, pkg }] of [...packages].sort(([a], [b]) => a.localeCompa
 await fs.writeFile(path.join(output, 'LICENSE-mermaid-dependencies.txt'), notices.replace(/[ \t]+$/gm, '').trimEnd() + '\n');
 await fs.copyFile(path.join(modules, 'mermaid/LICENSE'), path.join(output, 'LICENSE-mermaid.txt'));
 await fs.copyFile(path.join(modules, 'katex/LICENSE'), path.join(output, 'katex/LICENSE.txt'));
-await fs.writeFile(path.join(output, 'mermaid.min.js.gz'), gzipSync(result.outputFiles[0].contents, { level: 9 }));
-await fs.writeFile(path.join(output, 'katex/katex.min.js.gz'), gzipSync(await fs.readFile(path.join(modules, 'katex/dist/katex.min.js')), { level: 9 }));
+await fs.writeFile(path.join(output, 'mermaid.min.js.gz'), gzipSync(result.outputFiles[0].contents, { level: 9, mtime: 0 }));
+await fs.writeFile(path.join(output, 'katex/katex.min.js.gz'), gzipSync(await fs.readFile(path.join(modules, 'katex/dist/katex.min.js')), { level: 9, mtime: 0 }));
 const css = (await fs.readFile(path.join(modules, 'katex/dist/katex.min.css'), 'utf8'))
   .replace(/,url\([^)]*\.woff\) format\("woff"\)/g, '')
   .replace(/,url\([^)]*\.ttf\) format\("truetype"\)/g, '');
@@ -82,6 +83,7 @@ await fs.writeFile(path.join(output, 'components.json'), JSON.stringify({
   dompurify: manifest.dependencies.dompurify,
   katex: manifest.dependencies.katex,
   esbuild: manifest.dependencies.esbuild,
+  fflate: manifest.dependencies.fflate,
   lockSHA256: sha256(await fs.readFile(path.join(root, 'package-lock.json'))),
   mermaidSHA256: sha256(await fs.readFile(path.join(output, 'mermaid.min.js.gz'))),
   katexSHA256: sha256(await fs.readFile(path.join(output, 'katex/katex.min.js.gz'))),

@@ -119,7 +119,8 @@ Run the tests with `go test ./...`. For quick work on the interface,
 above (see the comment at the top of the file).
 
 Frontend assets are already bundled; Node.js 22.22.1 and npm are only needed
-for vendor maintenance. CI uses that Node.js version for reproducible compression.
+for vendor maintenance. CI uses that Node.js version to verify generated assets.
+Compression uses a pinned JavaScript library to avoid system zlib differences.
 Run `bash scripts/update-vendor.sh` to rebuild from `scripts/vendor/package-lock.json`,
 or `bash scripts/update-vendor.sh --check` to verify the checked-in assets. To update
 dependencies, edit `scripts/vendor/package.json`, regenerate its lock with npm,

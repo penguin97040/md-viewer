@@ -19,9 +19,10 @@ Licence texts for the bundled frontend libraries are kept next to them in
 
 Mermaid is rebuilt from its core entrypoint with DOMPurify 3.4.16 and KaTeX
 0.19.0, using esbuild 0.28.2 (MIT). The same KaTeX version is used for diagram
-labels and standalone maths. The maintenance dependency graph, including
+labels and standalone maths. Compression uses fflate 0.8.3 (MIT). The
+maintenance dependency graph, including
 integrity hashes and overrides, is locked in `scripts/vendor/package-lock.json`.
 `frontend/vendor/components.json` records versions and bundle hashes;
 `frontend/vendor/LICENSE-mermaid-dependencies.txt` contains the licence texts
-for all packages included in the Mermaid bundle. esbuild is a maintenance tool
-and is not shipped as executable code.
+for all packages included in the Mermaid bundle. esbuild and fflate are
+maintenance tools and are not shipped as executable code.
