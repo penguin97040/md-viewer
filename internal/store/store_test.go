@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/penguin97040/md-viewer/internal/doc"
 )
 
 func write(t *testing.T, p, s string) {
@@ -124,12 +126,12 @@ func TestStoreCloseDuringLiveReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := s.byKey[info.Key]
-	s.fileChanged(e) // the id moves on before the frontend closes the tab
+	s.fileChanged(e, e.watchGen) // the id moves on before the frontend closes the tab
 	s.Close(info.Key)
 	if len(s.byKey) != 0 || len(s.byID) != 0 || e.watcher != nil {
 		t.Errorf("left behind: %d keys, %d ids, watcher %v", len(s.byKey), len(s.byID), e.watcher != nil)
 	}
-	s.fileChanged(e) // a late event for a closed document does nothing
+	s.fileChanged(e, e.watchGen) // a late event for a closed document does nothing
 	if len(s.byID) != 0 {
 		t.Error("closed document reopened by a late file event")
 	}
@@ -141,7 +143,8 @@ func TestStoreOlderReadLoses(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "a.md")
 	write(t, p, "# One\n")
-	s := New(false, nil)
+	s := New(true, nil)
+	defer s.CloseAll()
 	info, err := s.Open(p)
 	if err != nil {
 		t.Fatal(err)
@@ -149,8 +152,9 @@ func TestStoreOlderReadLoses(t *testing.T) {
 	e := s.byKey[info.Key]
 	early := s.startLoad()
 	stale := e.doc
-	write(t, p, "# One\n\n## Two\n")
-	s.fileChanged(e)
+	newer := doc.Parse([]byte("# One\n\n## Two\n"))
+	s.load = func(string) (*doc.Doc, error) { return newer, nil }
+	s.fileChanged(e, e.watchGen)
 	live := e.id
 
 	s.mu.Lock()
@@ -219,5 +223,48 @@ func TestOpenRefusesNonFiles(t *testing.T) {
 		if _, err := s.Open("/dev/null"); err == nil {
 			t.Error("opened a device")
 		}
+	}
+}
+
+func TestLiveReloadInvalidatedDuringRead(t *testing.T) {
+	for _, replace := range []bool{false, true} {
+		t.Run(map[bool]string{false: "disabled", true: "replaced"}[replace], func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "a.md")
+			write(t, p, "# One\n")
+			changed := make(chan *Info, 1)
+			s := New(true, func(info *Info) { changed <- info })
+			defer s.CloseAll()
+			info, err := s.Open(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e := s.byKey[info.Key]
+			gen := e.watchGen
+			started, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			newer := doc.Parse([]byte("# Two\n"))
+			s.load = func(string) (*doc.Doc, error) {
+				close(started)
+				<-release
+				return newer, nil
+			}
+			go func() { defer close(done); s.fileChanged(e, gen) }()
+			<-started
+			s.SetLive(false)
+			if replace {
+				s.SetLive(true)
+			}
+			close(release)
+			<-done
+			if e.id != info.ID || e.doc.Headings[0].Text != "One" {
+				t.Fatal("stale watcher installed a parse")
+			}
+			select {
+			case <-changed:
+				t.Fatal("stale watcher emitted a change")
+			default:
+			}
+			// A callback that starts only after replacement must also do nothing.
+			s.fileChanged(e, gen)
+		})
 	}
 }

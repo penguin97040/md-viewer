@@ -1,4 +1,4 @@
-import { Tabs } from './tabs.js';
+import { Tabs, pathKey } from './tabs.js';
 import { Toc } from './toc.js';
 import { Find } from './find.js';
 import { enhance, retheme, installInteractions, printDiagrams, clearPrintDiagrams, idle } from './extras.js';
@@ -49,12 +49,16 @@ function applySettings(prev) {
 }
 
 let saveTimer;
+let saves = Promise.resolve();
 function update(patch) {
   const prev = settings;
   settings = { ...settings, ...patch };
   applySettings(prev);
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => go.SaveSettings(settings).catch(() => {}), 300);
+  saveTimer = setTimeout(() => {
+    const snapshot = { ...settings };
+    saves = saves.then(() => go.SaveSettings(snapshot)).catch(showError);
+  }, 300);
 }
 
 function syncSettingsUI() {
@@ -122,10 +126,13 @@ const find = new Find({
 }, { viewer: () => tabs.active?.viewer ?? null, search: (id, q) => go.Search(id, q) });
 
 let shown = null; // the tab the TOC and title currently describe
+let activationGen = 0;
 
 // activated runs when a tab is shown (or loaded), or with null when the last
 // tab closes.
 async function activated(tab) {
+  const gen = ++activationGen;
+  find.invalidate();
   if (shown && shown !== tab) shown.tocScroll = tocNav.scrollTop;
   shown = tab;
   updateWebBar();
@@ -144,9 +151,14 @@ async function activated(tab) {
   if (tab.pending) {
     const next = tab.pending;
     tab.pending = null;
-    await tab.load(next, true);
-    if (tabs.active !== tab) return;
+    const loaded = await tab.load(next, true);
+    if (tabs.active !== tab || gen !== activationGen) return;
+    if (!loaded) {
+      if (tab.pending) return activated(tab);
+      return;
+    }
   }
+  if (tab.viewer.info !== tab.info) return;
   if (tab.dirty) {
     tab.dirty = false;
     tab.viewer.relayout();
@@ -168,17 +180,50 @@ async function activated(tab) {
 }
 
 // openPath shows a file, switching to its tab if it is already open.
+const opening = new Map();
 async function openPath(path, fragment = '') {
+  const key = pathKey(path);
+  const pending = opening.get(key);
+  if (pending) {
+    const tab = await pending;
+    if (tab && tabs.list.includes(tab)) {
+      tabs.activate(tab);
+      if (fragment) tab.jumpTo(fragment);
+    }
+    return;
+  }
   const existing = tabs.byPath(path);
   if (existing) {
     tabs.activate(existing);
     if (fragment) existing.jumpTo(fragment);
     return;
   }
+  const operation = (async () => {
+    try {
+      const info = await go.Open(path);
+      // Go normalises relative paths. Another open may have created a tab
+      // for that path while this request was parsing.
+      const tab = tabs.byPath(info.path);
+      if (tab) {
+        if (info.key !== tab.key) await go.Close(info.key);
+        if (tabs.list.includes(tab)) {
+          tabs.activate(tab);
+          if (fragment) tab.jumpTo(fragment);
+          return tab;
+        }
+        return null;
+      }
+      return await tabs.add(info, fragment);
+    } catch (e) {
+      showError(e);
+      return null;
+    }
+  })();
+  opening.set(key, operation);
   try {
-    await tabs.add(await go.Open(path), fragment);
-  } catch (e) {
-    showError(e);
+    return await operation;
+  } finally {
+    if (opening.get(key) === operation) opening.delete(key);
   }
 }
 
@@ -212,7 +257,9 @@ async function showParse(tab, info) {
     tab.pending = info;
     return;
   }
+  find.invalidate();
   if (await tab.load(info, true)) refresh(tab);
+  else if (tab === tabs.active && tab.pending) activated(tab);
 }
 
 async function reload() {
@@ -369,6 +416,7 @@ async function savePdf() {
   const done = new AbortController();
   printing = { tab, done };
   const gen = tab.viewer.gen;
+  const activity = tab.viewer.activity;
   let cancelled = false;
   const cancel = { label: 'Cancel', fn: () => { cancelled = true; } };
   // check stops if the PDF can no longer come from what this tab shows:
@@ -376,6 +424,7 @@ async function savePdf() {
   const check = () => {
     if (cancelled) throw new Error('cancelled');
     if (tabs.active !== tab) throw new Error('Save as PDF stopped because the tab changed');
+    if (tab.viewer.activity !== activity) throw new Error('Save as PDF stopped because the tab changed');
     if (tab.viewer.gen !== gen) throw new Error('Save as PDF stopped because the file changed');
   };
   try {

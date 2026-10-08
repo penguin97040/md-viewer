@@ -1,6 +1,6 @@
 module github.com/penguin97040/md-viewer
 
-go 1.26.0
+go 1.26.6
 
 require (
 	github.com/alecthomas/chroma/v2 v2.27.0

@@ -22,17 +22,19 @@ export class Viewer {
     this.info = null;
     this.chunks = [];
     this.gen = 0;
+    this.activity = 0; // changes whenever the tab is hidden
+    this.navigation = 0;
     this.sumEst = 0;
     this.sumReal = 0;
     this.paused = false;  // hidden tab: ignore observer noise
     this.holding = false; // printing: keep everything mounted
 
     this.mountObs = new IntersectionObserver((es) => {
-      for (const e of es) if (e.isIntersecting) this.mount(+e.target.dataset.i);
+      for (const e of es) if (e.isIntersecting && this.chunks[+e.target.dataset.i]?.el === e.target) this.mount(+e.target.dataset.i);
     }, { root: scroller, rootMargin: MOUNT_MARGIN });
 
     this.keepObs = new IntersectionObserver((es) => {
-      for (const e of es) if (!e.isIntersecting) this.unmount(+e.target.dataset.i);
+      for (const e of es) if (!e.isIntersecting && this.chunks[+e.target.dataset.i]?.el === e.target) this.unmount(+e.target.dataset.i);
     }, { root: scroller, rootMargin: KEEP_MARGIN });
 
     this.resizeObs = new ResizeObserver((es) => this.onResize(es));
@@ -61,6 +63,9 @@ export class Viewer {
   // reload.
   async load(info, anchor) {
     const gen = ++this.gen;
+    const activity = this.activity;
+    this.navigation++;
+    clearTimeout(this.reTimer);
     const n = info.chunks.length;
     const start = anchor ? Math.min(anchor.chunk, n - 1) : 0;
 
@@ -71,7 +76,7 @@ export class Viewer {
     }));
     // Superseded, or the tab was hidden meanwhile (it can't be measured
     // now); the caller loads it again when shown.
-    if (gen !== this.gen || this.paused) return false;
+    if (gen !== this.gen || activity !== this.activity || this.paused) return false;
 
     this.mountObs.disconnect();
     this.keepObs.disconnect();
@@ -114,6 +119,8 @@ export class Viewer {
 
   clear() {
     this.gen++;
+    this.navigation++;
+    clearTimeout(this.reTimer);
     this.mountObs.disconnect();
     this.keepObs.disconnect();
     this.resizeObs.disconnect();
@@ -124,21 +131,23 @@ export class Viewer {
 
   mount(i) {
     const c = this.chunks[i];
-    if (!c) return Promise.resolve();
+    if (!c || this.paused) return Promise.resolve();
     if (c.state === 'mounted') return Promise.resolve();
     if (c.state === 'loading') return c.promise;
     c.state = 'loading';
     const gen = this.gen;
-    c.promise = this.fetchChunk(this.info.id, i).then((html) => {
-      if (gen !== this.gen || c.state !== 'loading') return;
-      if (this.paused) {
-        c.state = 'empty'; // tab hidden meanwhile; it can't be measured now
+    const activity = this.activity;
+    const promise = this.fetchChunk(this.info.id, i).then((html) => {
+      if (c.promise !== promise || c.state !== 'loading') return;
+      if (gen !== this.gen || activity !== this.activity || this.paused) {
+        c.state = 'empty';
         return;
       }
       this.mountHTML(c, html);
     }, () => {
-      if (c.state === 'loading') c.state = 'empty';
+      if (c.promise === promise && c.state === 'loading') c.state = 'empty';
     });
+    c.promise = promise;
     return c.promise;
   }
 
@@ -197,6 +206,7 @@ export class Viewer {
   scheduleReestimate() {
     clearTimeout(this.reTimer);
     this.reTimer = setTimeout(() => {
+      if (this.paused) return;
       const r = this.ratio;
       const bottom = this.sc.scrollTop + this.sc.clientHeight;
       for (const c of this.chunks) {
@@ -263,21 +273,28 @@ export class Viewer {
 
   // goTo scrolls to chunk i, or to the element with the given id inside it.
   async goTo(i, id) {
+    const navigation = ++this.navigation;
+    const gen = this.gen;
+    const activity = this.activity;
     const c = this.chunks[i];
-    if (!c) return;
+    if (!c || this.paused) return;
     if (c.state !== 'mounted') {
       this.sc.scrollTop = c.el.offsetTop;
       await this.mount(i);
     }
+    if (navigation !== this.navigation || gen !== this.gen || activity !== this.activity || this.paused || c.state !== 'mounted') return;
     let el = null;
-    if (id) el = c.el.querySelector('#' + CSS.escape(id)) || document.getElementById(id);
+    if (id) el = c.el.querySelector('#' + CSS.escape(id));
     this.sc.scrollTop = this.top(el || c.el) - 12;
   }
 
   // ensure mounts chunk i and returns its element.
   async ensure(i) {
+    const gen = this.gen;
+    const activity = this.activity;
+    const c = this.chunks[i];
     await this.mount(i);
-    return this.chunks[i]?.el;
+    if (gen === this.gen && activity === this.activity && !this.paused && c?.state === 'mounted') return c.el;
   }
 
   mounted() {
@@ -287,7 +304,29 @@ export class Viewer {
   // setActive pauses the viewer while its tab is hidden, when every element
   // measures zero and would otherwise be unmounted or mis-measured.
   setActive(on) {
+    if (!on && !this.paused) {
+      this.activity++;
+      this.navigation++;
+      clearTimeout(this.reTimer);
+      for (const c of this.chunks) {
+        if (c.state === 'loading') {
+          c.state = 'empty';
+          c.promise = null;
+        }
+      }
+    }
+    const resumed = on && this.paused;
     this.paused = !on;
+    if (resumed) {
+      // A switch away and back can happen between frames. Renew observation
+      // so cancelled visible loads restart even without a visibility event.
+      this.mountObs.disconnect();
+      this.keepObs.disconnect();
+      for (const c of this.chunks) {
+        this.mountObs.observe(c.el);
+        if (this.big) this.keepObs.observe(c.el);
+      }
+    }
   }
 
   // mountAll renders the whole document (for printing) and keeps it mounted
@@ -297,6 +336,7 @@ export class Viewer {
   async mountAll(onProgress) {
     this.holding = true;
     const gen = this.gen;
+    const activity = this.activity;
     const todo = this.chunks.filter((c) => c.state !== 'mounted').map((c) => c.i);
     const total = this.chunks.length;
     let done = total - todo.length;
@@ -305,11 +345,12 @@ export class Viewer {
     const worker = async () => {
       while (!stopped && next < todo.length) {
         await this.mount(todo[next++]);
-        if (this.paused || gen !== this.gen || onProgress?.(++done / total) === false) stopped = true;
+        if (this.paused || gen !== this.gen || activity !== this.activity || onProgress?.(++done / total) === false) stopped = true;
       }
     };
     await Promise.all(Array.from({ length: 6 }, worker));
-    return !stopped && gen === this.gen && this.chunks.every((c) => c.state === 'mounted');
+    return !stopped && !this.paused && gen === this.gen && activity === this.activity &&
+      this.chunks.every((c) => c.state === 'mounted');
   }
 
   // resumeUnmount ends mountAll, emptying chunks far from the view again.

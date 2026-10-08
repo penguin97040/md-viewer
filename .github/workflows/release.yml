@@ -14,7 +14,11 @@ env:
   WAILS_VERSION: v2.16.0
 
 jobs:
+  dependencies:
+    uses: ./.github/workflows/dependencies.yml
+
   build:
+    needs: dependencies
     strategy:
       fail-fast: false
       matrix:
@@ -69,6 +73,12 @@ jobs:
         run: |
           wails build -platform "$PLATFORM" -trimpath ${TAGS:+-tags "$TAGS"} \
             -ldflags "-s -w -X main.version=$VERSION"
+
+      - name: Scan Windows executable
+        if: matrix.name == 'windows'
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+          govulncheck -mode binary build/bin/md-viewer.exe
 
       - name: Package
         shell: bash

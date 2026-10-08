@@ -38,12 +38,13 @@ type Info struct {
 // the frontend never mixes chunks from two versions of a file; its key
 // doesn't, so a tab can always close or reload it.
 type entry struct {
-	key     int
-	id      int
-	ticket  int // when the parse in doc started reading the file
-	path    string
-	doc     *doc.Doc
-	watcher *watch.Watcher
+	key      int
+	id       int
+	ticket   int // when the parse in doc started reading the file
+	path     string
+	doc      *doc.Doc
+	watcher  *watch.Watcher
+	watchGen uint64 // invalidates callbacks from disabled or replaced watchers
 }
 
 // Store holds the open documents.
@@ -58,6 +59,7 @@ type Store struct {
 
 	// onChange is called (without the lock held) after a live reload.
 	onChange func(info *Info)
+	load     func(string) (*doc.Doc, error)
 }
 
 // New returns an empty store. With live on, files are watched and onChange
@@ -69,7 +71,8 @@ func New(live bool, onChange func(*Info)) *Store {
 	}
 	return &Store{
 		byKey: make(map[int]*entry), byID: make(map[int]*entry), live: live, onChange: onChange,
-		web: "/web/" + hex.EncodeToString(t),
+		web:  "/web/" + hex.EncodeToString(t),
+		load: doc.Load,
 	}
 }
 
@@ -103,7 +106,7 @@ func (s *Store) Open(path string) (*Info, error) {
 		return nil, errors.New("that is not an ordinary file")
 	}
 	t := s.startLoad()
-	d, err := doc.Load(abs)
+	d, err := s.load(abs)
 	if err != nil {
 		return nil, err
 	}
@@ -137,6 +140,7 @@ func (s *Store) CloseAll() {
 
 // drop removes an entry. Callers hold s.mu.
 func (s *Store) drop(e *entry) {
+	e.watchGen++
 	e.watcher.Close()
 	e.watcher = nil
 	delete(s.byKey, e.key)
@@ -154,7 +158,7 @@ func (s *Store) Reload(key int) (*Info, error) {
 		return nil, errors.New("document is no longer open")
 	}
 	t := s.startLoad()
-	d, err := doc.Load(e.path)
+	d, err := s.load(e.path)
 	if err != nil {
 		return nil, err
 	}
@@ -287,6 +291,7 @@ func (s *Store) SetLive(on bool) {
 // hold s.mu.
 func (s *Store) syncWatcher(e *entry) {
 	if !s.live {
+		e.watchGen++
 		e.watcher.Close()
 		e.watcher = nil
 		return
@@ -294,7 +299,9 @@ func (s *Store) syncWatcher(e *entry) {
 	if e.watcher != nil {
 		return
 	}
-	w, err := watch.New(e.path, func() { s.fileChanged(e) })
+	e.watchGen++
+	gen := e.watchGen
+	w, err := watch.New(e.path, func() { s.fileChanged(e, gen) })
 	if err == nil {
 		e.watcher = w
 	}
@@ -302,19 +309,34 @@ func (s *Store) syncWatcher(e *entry) {
 
 // fileChanged reloads after an edit on disk. Editors that save by renaming
 // can leave the file briefly missing, so a failed read is retried once.
-func (s *Store) fileChanged(e *entry) {
-	t := s.startLoad()
-	d, err := doc.Load(e.path)
+func (s *Store) fileChanged(e *entry, gen uint64) {
+	start := func() (int, bool) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.byKey[e.key] != e || !s.live || e.watchGen != gen {
+			return 0, false
+		}
+		s.ticket++
+		return s.ticket, true
+	}
+	t, valid := start()
+	if !valid {
+		return
+	}
+	d, err := s.load(e.path)
 	if err != nil {
 		time.Sleep(300 * time.Millisecond)
-		t = s.startLoad()
-		if d, err = doc.Load(e.path); err != nil {
+		t, valid = start()
+		if !valid {
+			return
+		}
+		if d, err = s.load(e.path); err != nil {
 			return
 		}
 	}
 	s.mu.Lock()
 	var info *Info
-	ok := s.byKey[e.key] == e // not closed meanwhile
+	ok := s.byKey[e.key] == e && s.live && e.watchGen == gen
 	if ok {
 		info, ok = s.install(e, d, t)
 	}

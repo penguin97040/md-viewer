@@ -5,6 +5,7 @@
 package webimage
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -18,36 +19,71 @@ import (
 // MaxBytes is the largest image fetched.
 const MaxBytes = 25 << 20
 
-// allowLoopback lets tests fetch from a local server.
-var allowLoopback = false
+var client = newClient(net.DefaultResolver.LookupIPAddr, (&net.Dialer{Timeout: 10 * time.Second}).DialContext)
 
-var client = &http.Client{
-	Timeout: 30 * time.Second,
-	CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 5 {
-			return errors.New("too many redirects")
+// newClient resolves and validates destinations at the connection boundary.
+// Dial only the validated IP, so a second DNS lookup cannot change it. The
+// transport still verifies TLS against the original hostname. Proxies are
+// disabled because they would resolve and connect outside these checks.
+func newClient(lookup func(context.Context, string) ([]net.IPAddr, error), dial func(context.Context, string, string) (net.Conn, error)) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
 		}
-		return check(req.URL)
-	},
+		ips, err := lookup(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		if len(ips) == 0 {
+			return nil, errors.New("no web address found")
+		}
+		for _, ip := range ips {
+			if ip.Zone != "" || !publicIP(ip.IP) {
+				return nil, errors.New("not a public web address")
+			}
+		}
+		for _, ip := range ips {
+			var conn net.Conn
+			conn, err = dial(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+			if err == nil {
+				return conn, nil
+			}
+		}
+		return nil, err
+	}
+	return &http.Client{
+		Transport: transport,
+		Timeout:   30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("too many redirects")
+			}
+			return check(req.URL)
+		},
+	}
 }
 
-// check allows http and https addresses on other machines. Loopback and
-// link-local addresses are refused, so a document can't use the reader's
-// consent to poke at services on their own computer or a cloud metadata
-// endpoint. (Names that resolve to such addresses are not caught; this is a
-// guard against the obvious, not a firewall.)
+func publicIP(ip net.IP) bool {
+	return ip.IsGlobalUnicast() && !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast()
+}
+
+// check rejects unsafe URL forms and literal addresses. DNS answers are
+// checked again by the transport when it connects, including on redirects.
 func check(u *url.URL) error {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return errors.New("not a web address")
 	}
-	host := u.Hostname()
-	if allowLoopback && host == "127.0.0.1" {
-		return nil
-	}
+	host := strings.TrimSuffix(u.Hostname(), ".")
 	if host == "" || strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
 		return errors.New("not a web address")
 	}
-	if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified()) {
+	if strings.Contains(host, "%") {
+		return errors.New("not a web address")
+	}
+	if ip := net.ParseIP(host); ip != nil && !publicIP(ip) {
 		return errors.New("not a web address")
 	}
 	return nil

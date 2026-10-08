@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 // Settings are the user's viewer preferences.
@@ -58,12 +59,20 @@ func Load() Settings {
 	return s.Clean()
 }
 
-// Save writes settings to disk.
+var saveMu sync.Mutex
+
+// Save writes settings to disk, serialising replacements of the same file.
 func Save(s Settings) error {
 	p, err := path()
 	if err != nil {
 		return err
 	}
+	return saveFile(p, s)
+}
+
+func saveFile(p string, s Settings) error {
+	saveMu.Lock()
+	defer saveMu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
@@ -71,11 +80,19 @@ func Save(s Settings) error {
 	if err != nil {
 		return err
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(p), "settings-*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, p)
+	defer os.Remove(f.Name())
+	if _, err = f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), p)
 }
 
 // Clean clamps values into their allowed ranges.

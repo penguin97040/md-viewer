@@ -21,6 +21,7 @@ type App struct {
 	store *store.Store
 
 	mu         sync.Mutex
+	saveMu     sync.Mutex      // orders persistence and its runtime effects
 	ctx        context.Context // nil until startup, which Wails runs in a goroutine
 	ready      bool            // the frontend has asked for its start files
 	startFiles []string        // from the command line, a second launch or the OS
@@ -177,7 +178,12 @@ func (a *App) Settings() settings.Settings {
 
 // SaveSettings stores settings and applies the parts Go owns.
 func (a *App) SaveSettings(s settings.Settings) error {
+	a.saveMu.Lock()
+	defer a.saveMu.Unlock()
 	s = s.Clean()
+	if err := settings.Save(s); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	themeChanged := s.Theme != a.settings.Theme
 	liveChanged := s.LiveReload != a.settings.LiveReload
@@ -187,13 +193,15 @@ func (a *App) SaveSettings(s settings.Settings) error {
 		a.store.SetLive(s.LiveReload)
 	}
 	if themeChanged {
-		if s.Theme == "light" {
-			runtime.WindowSetLightTheme(a.context())
-		} else {
-			runtime.WindowSetDarkTheme(a.context())
+		if ctx := a.context(); ctx != nil {
+			if s.Theme == "light" {
+				runtime.WindowSetLightTheme(ctx)
+			} else {
+				runtime.WindowSetDarkTheme(ctx)
+			}
 		}
 	}
-	return settings.Save(s)
+	return nil
 }
 
 // OpenURL opens a web link in the system browser.

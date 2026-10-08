@@ -87,7 +87,7 @@ async function mermaidReady(theme) {
       // and theme CSS are pasted into the diagram's stylesheet, which applies
       // to the whole page.
       secure: ['secure', 'securityLevel', 'startOnLoad', 'maxTextSize', 'suppressErrorRendering', 'maxEdges',
-        'fontFamily', 'altFontFamily', 'themeCSS', 'themeVariables'],
+        'fontFamily', 'altFontFamily', 'themeCSS', 'themeVariables', 'dompurifyConfig'],
       theme: theme === 'dark' ? 'dark' : 'default',
       fontFamily: getComputedStyle(document.body).fontFamily,
     });

@@ -95,7 +95,7 @@ Settings are saved to `md-viewer/settings.json` in your user config folder
 
 ## Building from source
 
-You need [Go](https://go.dev/dl/) 1.25 or newer and the
+You need [Go](https://go.dev/dl/) 1.26.6 or newer and the
 [Wails v2](https://wails.io/docs/gettingstarted/installation) CLI:
 
 ```
@@ -117,6 +117,14 @@ Run the tests with `go test ./...`. For quick work on the interface,
 `go run ./cmd/devserver file.md` serves the frontend to an ordinary browser at
 <http://127.0.0.1:8080>. `scripts/screenshots.mjs` regenerates the screenshots
 above (see the comment at the top of the file).
+
+Frontend assets are already bundled; Node.js 22.22.1 and npm are only needed
+for vendor maintenance. CI uses that Node.js version for reproducible compression.
+Run `bash scripts/update-vendor.sh` to rebuild from `scripts/vendor/package-lock.json`,
+or `bash scripts/update-vendor.sh --check` to verify the checked-in assets. To update
+dependencies, edit `scripts/vendor/package.json`, regenerate its lock with npm,
+audit it with `npm audit --prefix scripts/vendor --audit-level=info`, then rebuild
+and update [THIRD-PARTY.md](THIRD-PARTY.md).
 
 ### How it works
 

@@ -6,11 +6,13 @@ import { Viewer } from './viewer.js';
 // Windows and macOS file systems usually ignore case in names; Linux ones
 // don't.
 const FOLD_CASE = /^(win|mac)/i.test(navigator.platform);
-const fold = (s) => (FOLD_CASE ? s.toLowerCase() : s);
+export const pathKey = (s) => (FOLD_CASE ? s.toLowerCase() : s);
 
 export class Tab {
   constructor(host, { fetchChunk, afterMount, onScroll }) {
     this.key = 0;           // Go's key for this tab's document
+    this.loadGen = 0;
+    this.closed = false;
     this.info = null;
     this.pending = null;    // a newer parse to load when the tab is next shown
     this.firstHeading = []; // chunk -> index of its first heading
@@ -38,13 +40,16 @@ export class Tab {
 
   // newestId is the id of the latest parse this tab has, shown or pending.
   get newestId() {
-    return this.pending?.id ?? this.info?.id ?? 0;
+    return Math.max(this.pending?.id ?? 0, this.info?.id ?? 0);
   }
 
   // load shows a parse of this tab's file, as Go sent it. keep holds the
   // reading position (reloads). If the tab is hidden before the parse can
   // be shown, it waits in pending until the tab is shown again.
   async load(info, keep = false) {
+    if (this.closed || info.id < this.newestId) return false;
+    const gen = ++this.loadGen;
+    if (this.pending?.id <= info.id) this.pending = null;
     // Go sends compact arrays; expand them into a copy, leaving info as it
     // was in case it has to wait in pending.
     const doc = {
@@ -58,18 +63,20 @@ export class Tab {
     if (keep) anchor = this.anchor ?? (this.info?.chunks ? this.viewer.anchor() : null);
     this.anchor = null;
     this.info = doc;
+    this.firstHeading = [];
     // Relative images resolve against <base>, so point it at this file's
     // folder before anything is mounted.
     if (!this.scroller.hidden) document.getElementById('base').href = doc.base;
     if (!(await this.viewer.load(doc, anchor))) {
       // Hidden meanwhile: hidden elements measure zero and <base> belongs
       // to another tab, so wait until this one is shown.
-      if (this.info === doc && this.viewer.paused) {
-        this.pending = info;
+      if (!this.closed && gen === this.loadGen && this.info === doc) {
+        if (!this.pending || this.pending.id < info.id) this.pending = info;
         this.anchor ??= anchor;
       }
       return false;
     }
+    if (this.closed || gen !== this.loadGen || this.info !== doc) return false;
     const n = doc.chunks.length;
     const fh = new Array(n + 1).fill(doc.headings.length);
     for (let k = doc.headings.length - 1; k >= 0; k--) fh[doc.headings[k].chunk] = k;
@@ -81,7 +88,8 @@ export class Tab {
   // jumpTo scrolls to an element id: one already on screen first (footnote
   // ids can repeat across sections of very large files), then Go's maps.
   jumpTo(id) {
-    if (!this.info || !id) return;
+    if (this.closed || this.viewer.paused || !this.info || !id) return;
+    this.viewer.navigation++;
     try { id = decodeURIComponent(id); } catch { /* keep as is */ }
     const el = this.docEl.querySelector('#' + CSS.escape(id));
     if (el) {
@@ -101,6 +109,7 @@ export class Tab {
     const hs = this.info?.headings;
     if (!hs?.length) return -1;
     const v = this.viewer;
+    if (v.info !== this.info || !this.firstHeading.length) return -1;
     const y = this.scroller.scrollTop + 80;
     const ci = v.chunkAt(y);
     let cur = this.firstHeading[ci] - 1;
@@ -126,6 +135,10 @@ export class Tab {
   }
 
   destroy() {
+    this.closed = true;
+    this.loadGen++;
+    this.pending = null;
+    this.viewer.setActive(false);
     this.viewer.clear();
     this.scroller.remove();
   }
@@ -164,8 +177,8 @@ export class Tabs {
   }
 
   byPath(path) {
-    const p = fold(path);
-    return this.list.find((t) => t.info && fold(t.info.path) === p);
+    const p = pathKey(path);
+    return this.list.find((t) => t.info && pathKey(t.info.path) === p);
   }
 
   byKey(key) {
@@ -196,7 +209,7 @@ export class Tabs {
   }
 
   activate(tab, notify = true) {
-    if (!tab) return;
+    if (!tab || !this.list.includes(tab)) return;
     if (this.active && this.active !== tab) this.active.hide();
     this.active = tab;
     for (const t of this.list) {
@@ -211,6 +224,7 @@ export class Tabs {
   close(tab) {
     if (!tab) return;
     const i = this.list.indexOf(tab);
+    if (i < 0) return;
     this.list.splice(i, 1);
     tab.el.remove();
     tab.destroy();
@@ -237,10 +251,10 @@ export class Tabs {
   // label names the tabs, adding the folder when two files share a name.
   label() {
     const count = new Map();
-    for (const t of this.list) count.set(fold(t.info.name), (count.get(fold(t.info.name)) || 0) + 1);
+    for (const t of this.list) count.set(pathKey(t.info.name), (count.get(pathKey(t.info.name)) || 0) + 1);
     for (const t of this.list) {
       let text = t.info.name;
-      if (count.get(fold(text)) > 1) {
+      if (count.get(pathKey(text)) > 1) {
         const parts = t.info.path.split(/[\\/]/);
         if (parts.length > 1) text += ' — ' + parts[parts.length - 2];
       }

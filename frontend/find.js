@@ -67,9 +67,10 @@ export class Find {
     this.total = 0;
     this.pos = -1; // global match index
     this.gen = 0;
+    this.showGen = 0;
 
     input.addEventListener('input', () => {
-      clearTimeout(this.timer);
+      this.invalidate();
       this.timer = setTimeout(() => this.run(), 160);
     });
     input.addEventListener('keydown', (e) => {
@@ -106,28 +107,45 @@ export class Find {
 
   close() {
     this.bar.hidden = true;
+    this.invalidate();
+    this.viewer?.sc.focus();
+  }
+
+  invalidate() {
+    clearTimeout(this.timer);
+    this.gen++;
+    this.showGen++;
     this.clearMarks();
     this.q = '';
     this.counts = [];
     this.total = 0;
     this.pos = -1;
     this.countEl.textContent = '';
-    this.viewer?.sc.focus();
   }
 
   // reset is called when the document changes.
   reset() {
+    this.invalidate();
     if (!this.isOpen) return;
-    this.q = '';
     this.run();
   }
 
+  current(viewer, id, gen, activity) {
+    return this.isOpen && viewer === this.viewer && !viewer.paused &&
+      viewer.info?.id === id && viewer.gen === gen && viewer.activity === activity;
+  }
+
   async run() {
+    this.invalidate();
+    if (!this.isOpen) return;
     const q = fold(this.input.value);
-    const gen = ++this.gen;
+    const gen = this.gen;
     this.q = q;
     this.clearMarks();
     const viewer = this.viewer;
+    const id = viewer?.info?.id;
+    const viewerGen = viewer?.gen;
+    const activity = viewer?.activity;
     if (!q || !viewer?.info) {
       this.counts = [];
       this.total = 0;
@@ -141,7 +159,7 @@ export class Find {
     } catch {
       return;
     }
-    if (gen !== this.gen) return;
+    if (gen !== this.gen || !this.current(viewer, id, viewerGen, activity)) return;
     this.counts = counts;
     this.total = counts.reduce((a, b) => a + b, 0);
     if (!this.total) {
@@ -178,12 +196,16 @@ export class Find {
 
   async show(k) {
     const gen = this.gen;
+    const showGen = ++this.showGen;
     this.pos = k;
     let [ci, nth] = this.locate(k);
     const viewer = this.viewer;
-    if (!viewer) return;
+    if (!viewer || !this.isOpen) return;
+    const id = viewer.info?.id;
+    const viewerGen = viewer.gen;
+    const activity = viewer.activity;
     const el = await viewer.ensure(ci);
-    if (gen !== this.gen || !el || viewer !== this.viewer) return;
+    if (gen !== this.gen || showGen !== this.showGen || !el || !this.current(viewer, id, viewerGen, activity)) return;
     const ranges = rangesIn(el, this.q);
     // Go's count can differ slightly from the DOM (e.g. raw HTML), so trust
     // the DOM once the chunk is on screen.
@@ -214,6 +236,7 @@ export class Find {
       const sel = window.getSelection();
       sel.removeAllRanges();
       sel.addRange(cur);
+      this.selectionRange = sel.getRangeAt(0);
     }
     const sc = this.viewer.sc;
     const r = cur.getBoundingClientRect();
@@ -229,6 +252,10 @@ export class Find {
     if (HAS_HIGHLIGHT) {
       CSS.highlights.delete('find');
       CSS.highlights.delete('find-current');
+    } else if (this.selectionRange) {
+      const sel = window.getSelection();
+      if (sel.rangeCount === 1 && sel.getRangeAt(0) === this.selectionRange) sel.removeAllRanges();
+      this.selectionRange = null;
     }
   }
 }
