@@ -7,7 +7,6 @@ package main
 
 import (
 	"bytes"
-	"compress/gzip"
 	"encoding/json"
 	"flag"
 	"io"
@@ -48,7 +47,12 @@ type server struct {
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "listen address")
+	multi := flag.Bool("session", false, "exercise shared multi-window sessions")
 	flag.Parse()
+	if *multi {
+		runSession(*addr, flag.Args())
+		return
+	}
 	srv := &server{docs: store.New(false, nil), start: flag.Args(), s: settings.Defaults()}
 	front := http.FileServer(http.Dir("frontend"))
 
@@ -81,10 +85,7 @@ func main() {
 			w.Write(b)
 			return
 		}
-		if gz, err := os.ReadFile(filepath.Join("frontend", r.URL.Path+".gz")); err == nil {
-			zr, _ := gzip.NewReader(bytes.NewReader(gz))
-			w.Header().Set("Content-Type", "text/javascript")
-			io.Copy(w, zr)
+		if serveCompressed(w, r, os.DirFS("frontend")) {
 			return
 		}
 		front.ServeHTTP(w, r)

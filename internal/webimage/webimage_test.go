@@ -107,6 +107,10 @@ func TestResolvedDestinations(t *testing.T) {
 		{"169.254.169.254"}, {"0.0.0.0"}, {"224.0.0.1"}, {"::"}, {"::1"},
 		{"fc00::1"}, {"fe80::1"}, {"ff02::1"}, {"::ffff:10.0.0.1"},
 		{"93.184.216.34", "127.0.0.1"}, {},
+		{"100.100.100.200"}, {"100.64.0.1"}, {"100.127.255.254"},
+		{"0.0.0.1"}, {"198.18.0.1"}, {"240.0.0.1"},
+		{"::ffff:100.100.100.200"}, {"64:ff9b::a00:1"},
+		{"64:ff9b:1::a00:1"}, {"2002:a00:1::1"},
 	} {
 		t.Run(strings.Join(ips, ","), func(t *testing.T) {
 			dialled := false
@@ -125,6 +129,23 @@ func TestResolvedDestinations(t *testing.T) {
 				t.Fatalf("unsafe DNS answer: err %v, dialled %v", err, dialled)
 			}
 		})
+	}
+}
+
+func TestPublicIP(t *testing.T) {
+	for _, raw := range []string{"8.8.8.8", "93.184.216.34", "100.63.255.255", "100.128.0.1", "::ffff:8.8.8.8", "2606:4700:4700::1111"} {
+		if !publicIP(net.ParseIP(raw)) {
+			t.Errorf("public destination refused: %s", raw)
+		}
+	}
+	for _, raw := range []string{"100.64.0.1", "100.100.100.200", "0.1.2.3", "198.19.255.254", "240.0.0.1", "192.0.2.1", "198.51.100.1", "203.0.113.1", "2001:db8::1", "2001::1", "64:ff9b::7f00:1", "64:ff9b:1::1", "2002:7f00:1::1"} {
+		if publicIP(net.ParseIP(raw)) {
+			t.Errorf("special-purpose destination allowed: %s", raw)
+		}
+		u := &url.URL{Scheme: "http", Host: net.JoinHostPort(raw, "80"), Path: "/a.png"}
+		if check(u) == nil {
+			t.Errorf("literal destination allowed: %s", raw)
+		}
 	}
 }
 

@@ -24,8 +24,9 @@ untrusted:
   opened the file, and from where. When you agree, they are fetched by the
   app, not the page.
   Destinations must resolve only to public IP addresses, including after
-  redirects. Private, loopback, link-local, unspecified and multicast
-  addresses are blocked; environment proxies are not used for these requests.
+  redirects. Private, loopback, link-local, shared, reserved and documentation
+  addresses are blocked, along with IPv6 translation/tunnel ranges that could
+  reach an internal IPv4 address. Environment proxies are not used for these requests.
 - **Links open outside.** Web and email links open in your browser. Links to
   other markdown files open in a new tab. Nothing else is followed, and the
   viewer itself never navigates away.

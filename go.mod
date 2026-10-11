@@ -1,6 +1,6 @@
 module github.com/penguin97040/md-viewer
 
-go 1.26.6
+go 1.26.9
 
 require (
 	github.com/alecthomas/chroma/v2 v2.27.0
@@ -9,7 +9,8 @@ require (
 	github.com/microcosm-cc/bluemonday v1.0.27
 	github.com/wailsapp/wails/v2 v2.16.0
 	github.com/yuin/goldmark v1.8.6
-	golang.org/x/net v0.59.0
+	golang.org/x/net v0.60.0
+	golang.org/x/sys v0.48.0
 )
 
 require (
@@ -41,6 +42,5 @@ require (
 	github.com/wailsapp/go-webview2 v1.0.23 // indirect
 	github.com/wailsapp/mimetype v1.4.1 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 )

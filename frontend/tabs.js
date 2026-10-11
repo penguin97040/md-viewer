@@ -62,6 +62,7 @@ export class Tab {
     let anchor = null;
     if (keep) anchor = this.anchor ?? (this.info?.chunks ? this.viewer.anchor() : null);
     this.anchor = null;
+    this.rawInfo = info;
     this.info = doc;
     this.firstHeading = [];
     // Relative images resolve against <base>, so point it at this file's
@@ -125,7 +126,7 @@ export class Tab {
 
   show() {
     this.scroller.hidden = false;
-    this.viewer.setActive(true);
+    this.viewer.setActive(!this.transferring);
   }
 
   hide() {
@@ -186,21 +187,29 @@ export class Tabs {
   }
 
   // add makes a tab for a freshly opened document and shows it.
-  async add(info, fragment = '') {
+  async add(info, fragment = '', state = null, index = null, transferToken = '') {
     const tab = new Tab(this.host, this.opts);
+    tab.incoming = transferToken;
     tab.el = document.createElement('div');
     tab.el.className = 'tab';
+    tab.el.draggable = true;
     tab.el.setAttribute('role', 'tab');
     tab.el.innerHTML = '<span class="name"></span><button class="x" tabindex="-1" aria-label="Close tab">' +
       '<svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7 7 17"/></svg></button>';
-    const at = this.active ? this.list.indexOf(this.active) + 1 : this.list.length;
+    const at = index === null ? (this.active ? this.list.indexOf(this.active) + 1 : this.list.length) : Math.max(0, Math.min(index, this.list.length));
     this.list.splice(at, 0, tab);
     this.strip.insertBefore(tab.el, this.list[at + 1]?.el || null);
     tab.key = info.key;
     tab.info = { path: info.path, name: info.name }; // for labels until loaded
     this.label();
     this.activate(tab, false);
-    await tab.load(info);
+    if (state) {
+      tab.webImages = !!state.webImages;
+      tab.webDismissed = !!state.webDismissed;
+      tab.tocScroll = state.tocScroll || 0;
+      tab.anchor = state.anchor;
+    }
+    await tab.load(info, !!state);
     if (this.active === tab) {
       this.onActivate(tab);
       if (fragment) tab.jumpTo(fragment);
@@ -221,14 +230,14 @@ export class Tabs {
     if (notify) this.onActivate(tab);
   }
 
-  close(tab) {
+  close(tab, moved = false) {
     if (!tab) return;
     const i = this.list.indexOf(tab);
     if (i < 0) return;
     this.list.splice(i, 1);
     tab.el.remove();
     tab.destroy();
-    this.onClose(tab);
+    if (!moved) this.onClose(tab);
     if (this.active === tab) {
       this.active = null;
       const next = this.list[Math.min(i, this.list.length - 1)];
@@ -236,6 +245,17 @@ export class Tabs {
       else this.onActivate(null);
     }
     this.label();
+  }
+
+  // Move the existing tab and viewer; keyboard navigation uses the same list.
+  reorder(tab, index) {
+    const old = this.list.indexOf(tab);
+    if (old < 0) return;
+    this.list.splice(old, 1);
+    if (old < index) index--;
+    index = Math.max(0, Math.min(index, this.list.length));
+    this.list.splice(index, 0, tab);
+    this.strip.insertBefore(tab.el, this.list[index + 1]?.el || null);
   }
 
   next(dir) {

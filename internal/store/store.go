@@ -392,3 +392,23 @@ func LocalPath(urlPath string) string {
 	}
 	return filepath.FromSlash(p)
 }
+
+// ReachableFrom applies the network-path policy to one owning document.
+func ReachableFrom(document, p string) bool {
+	if goruntime.GOOS != "windows" {
+		return true
+	}
+	share := windowsShare(p)
+	return share == "" || (share != deviceShare && share == windowsShare(document))
+}
+
+// Current returns metadata for the latest parse of a stable document key.
+func (s *Store) Current(key int) (*Info, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e := s.byKey[key]
+	if e == nil {
+		return nil, errors.New("document is no longer open")
+	}
+	return e.info(s.web), nil
+}

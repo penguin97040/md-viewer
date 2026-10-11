@@ -1,4 +1,5 @@
 import { Tabs, pathKey } from './tabs.js';
+import { installMovement } from './movement.js';
 import { Toc } from './toc.js';
 import { Find } from './find.js';
 import { enhance, retheme, installInteractions, printDiagrams, clearPrintDiagrams, idle } from './extras.js';
@@ -50,14 +51,30 @@ function applySettings(prev) {
 
 let saveTimer;
 let saves = Promise.resolve();
+let savesPending = 0;
+let settingsGen = 0;
 function update(patch) {
   const prev = settings;
+  settingsGen++;
   settings = { ...settings, ...patch };
   applySettings(prev);
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
+    saveTimer = null;
     const snapshot = { ...settings };
-    saves = saves.then(() => go.SaveSettings(snapshot)).catch(showError);
+    savesPending++;
+    saves = saves.then(() => go.SaveSettings(snapshot)).catch(showError).finally(async () => {
+      savesPending--;
+      if (saveTimer || savesPending) return;
+      const gen = settingsGen;
+      try {
+        const next = await go.Settings();
+        if (gen !== settingsGen || saveTimer || savesPending) return;
+        const prev = settings;
+        settings = { ...DEFAULTS, ...next };
+        applySettings(prev);
+      } catch (err) { showError(err); }
+    });
   }, 300);
 }
 
@@ -114,7 +131,8 @@ const tabs = new Tabs($('tabs'), $('docs'), {
   },
   onActivate: activated,
   onClose: (tab) => {
-    if (tab.key) go.Close(tab.key);
+    if (tab.incoming) go.DiscardTransfer(tab.incoming, tab.key).then(syncOrder).catch(showError);
+    else if (tab.key) go.Close(tab.key).then(syncOrder).catch(showError);
   },
 });
 
@@ -132,6 +150,7 @@ let activationGen = 0;
 // tab closes.
 async function activated(tab) {
   const gen = ++activationGen;
+  if (tab?.transferring || tab?.incoming) return;
   find.invalidate();
   if (shown && shown !== tab) shown.tocScroll = tocNav.scrollTop;
   shown = tab;
@@ -201,6 +220,7 @@ async function openPath(path, fragment = '') {
   const operation = (async () => {
     try {
       const info = await go.Open(path);
+      if (!info) return null; // focused an existing file in another window
       // Go normalises relative paths. Another open may have created a tab
       // for that path while this request was parsing.
       const tab = tabs.byPath(info.path);
@@ -213,7 +233,9 @@ async function openPath(path, fragment = '') {
         }
         return null;
       }
-      return await tabs.add(info, fragment);
+      const added = await tabs.add(info, fragment);
+      syncOrder();
+      return added;
     } catch (e) {
       showError(e);
       return null;
@@ -253,6 +275,7 @@ function refresh(tab) {
 // arrives late (a reload overtaken by a live reload) is ignored.
 async function showParse(tab, info) {
   if (!tabs.list.includes(tab) || info.id <= tab.newestId) return;
+  if (tab.transferring || tab.incoming) { tab.pending = info; return; }
   if (tab !== tabs.active) {
     tab.pending = info;
     return;
@@ -280,6 +303,122 @@ rt.EventsOn('doc:changed', (info) => {
 });
 rt.EventsOn('open:paths', openMany);
 rt.EventsOn('doc:error', showError);
+
+// ---- Window coordination and tab transfers ----
+
+let ordering = Promise.resolve();
+function syncOrder() {
+  const keys = tabs.list.filter((t) => !t.incoming).map((t) => t.key);
+  ordering = ordering.then(() => go.TabOrder(keys)).catch(() => {});
+  return ordering;
+}
+function readingState(tab) {
+  return {
+    anchor: tab.anchor ?? tab.viewer.anchor(),
+    tocScroll: tab === tabs.active ? tocNav.scrollTop : tab.tocScroll,
+    webImages: tab.webImages, webDismissed: tab.webDismissed,
+  };
+}
+function freezeTab(tab, token) {
+  tab.transferring = token;
+  tab.loadGen++;
+  if (tab.viewer.info !== tab.info && tab.rawInfo && (!tab.pending || tab.pending.id < tab.rawInfo.id)) tab.pending = tab.rawInfo;
+  tab.viewer.setActive(false);
+  find.invalidate();
+  if (printing?.tab === tab) finishPrint();
+}
+function resumeTab(tab) {
+  if (!tab || tab.closed) return;
+  tab.transferring = null;
+  tab.el.classList.remove('moving');
+  if (tab === tabs.active) { tab.viewer.setActive(true); activated(tab); }
+}
+const movement = installMovement(tabs, {
+  go, state: readingState, freeze: freezeTab, resume: resumeTab,
+  order: syncOrder, error: showError,
+});
+rt.EventsOn('tab:hover', movement.hover);
+rt.EventsOn('tab:drop', movement.drop);
+rt.EventsOn('tab:leave', movement.leave);
+window.addEventListener('focus', () => go.FocusWindow().catch(showError));
+rt.EventsOn('settings:changed', (next) => {
+  if (saveTimer || savesPending) return;
+  settingsGen++;
+  const prev = settings;
+  settings = { ...DEFAULTS, ...next };
+  applySettings(prev);
+});
+const incoming = new Map();
+rt.EventsOn('tab:offer', async (offer) => {
+  if (incoming.has(offer.token)) return;
+  const job = { cancelled: false, tab: null };
+  incoming.set(offer.token, job);
+  try {
+    document.body.classList.add('has-doc'); // incoming content must be measurable before acknowledgement
+    const tab = await tabs.add(offer.info, '', offer.state, offer.index, offer.token);
+    job.tab = tab;
+    tab.incoming = offer.token;
+    for (;;) {
+      if (job.cancelled || tab.closed || tab !== tabs.active || tab.viewer.paused || tab.pending) {
+        // A pending reload can be loaded; a hidden/closed destination rolls back.
+        if (!job.cancelled && !tab.closed && tab === tabs.active && tab.pending) {
+          const next = tab.pending;
+          tab.pending = null;
+          if (!(await tab.load(next, true))) throw new Error('Tab transfer was interrupted');
+        } else throw new Error('Tab transfer was interrupted');
+      }
+      if (tab.viewer.info !== tab.info || !tab.firstHeading.length) throw new Error('Tab could not be loaded');
+      const parse = tab.info;
+      if (parse.chunks.length) {
+        const chunk = Math.min(offer.state.anchor.chunk, parse.chunks.length - 1);
+        if (!(await tab.viewer.ensure(chunk))) {
+          if (job.cancelled || tab.closed || tab !== tabs.active) throw new Error('Tab transfer was interrupted');
+          const current = await go.TransferInfo(offer.token);
+          if (current.info.id !== parse.id) {
+            if (!(await tab.load(tab.pending?.id > current.info.id ? tab.pending : current.info, true))) throw new Error('Tab transfer was interrupted');
+            continue;
+          }
+          throw new Error('Tab could not be loaded');
+        }
+      }
+      await idle();
+      await Promise.all([...tab.docEl.querySelectorAll('img')].map((img) => img.decode().catch(() => {})));
+      if (job.cancelled || tab.closed || tab !== tabs.active || tab.info !== parse || tab.viewer.paused) throw new Error('Tab transfer was interrupted');
+      tab.viewer.restore(offer.state.anchor);
+      await go.WindowReady();
+      if (job.cancelled || tab.closed || tab !== tabs.active || tab.info !== parse || tab.viewer.paused) throw new Error('Tab transfer was interrupted');
+      const newer = await go.AcknowledgeTransfer(offer.token, tab.info.id);
+      if (job.cancelled || tab.closed) return;
+      if (!newer) { tab.incoming = null; incoming.delete(offer.token); syncOrder(); break; }
+      if (!(await tab.load(newer.info, true))) throw new Error('Tab transfer was interrupted');
+    }
+    activated(tab);
+  } catch (err) {
+    const wasCancelled = job.cancelled;
+    await go.CancelTransfer(offer.token).catch(showError);
+    if (job.tab && tabs.list.includes(job.tab)) tabs.close(job.tab, true);
+    incoming.delete(offer.token);
+    if (!wasCancelled) showError(err);
+  }
+});
+rt.EventsOn('tab:committed', (move) => {
+  if (move.destination) return;
+  const tab = tabs.byKey(move.key);
+  if (tab) tabs.close(tab, true);
+  if (move.empty) go.CloseWindow();
+  else syncOrder();
+});
+rt.EventsOn('window:close', () => go.CloseWindow());
+rt.EventsOn('tab:aborted', (move) => {
+  if (move.destination) {
+    const job = incoming.get(move.token);
+    if (job) {
+      job.cancelled = true;
+      if (job.tab) tabs.close(job.tab, true);
+      incoming.delete(move.token);
+    }
+  } else resumeTab(tabs.byKey(move.key));
+});
 
 // ---- Messages ----
 
@@ -423,6 +562,7 @@ async function savePdf() {
   // the print CSS prints only the visible tab.
   const check = () => {
     if (cancelled) throw new Error('cancelled');
+    if (tab.transferring || tab.closed) throw new Error('Save as PDF stopped because the tab moved');
     if (tabs.active !== tab) throw new Error('Save as PDF stopped because the tab changed');
     if (tab.viewer.activity !== activity) throw new Error('Save as PDF stopped because the tab changed');
     if (tab.viewer.gen !== gen) throw new Error('Save as PDF stopped because the file changed');

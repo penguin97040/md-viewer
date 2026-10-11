@@ -2,209 +2,264 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
-	"github.com/wailsapp/wails/v2/pkg/options"
-	"github.com/wailsapp/wails/v2/pkg/runtime"
-
+	"github.com/penguin97040/md-viewer/internal/native"
+	"github.com/penguin97040/md-viewer/internal/session"
 	"github.com/penguin97040/md-viewer/internal/settings"
 	"github.com/penguin97040/md-viewer/internal/store"
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 const appName = "MD Viewer"
 
-// App is bound to the frontend. Each open tab is a document in the store.
+// App keeps native UI in the window process and document state in the session.
 type App struct {
-	store *store.Store
-
-	mu         sync.Mutex
-	saveMu     sync.Mutex      // orders persistence and its runtime effects
-	ctx        context.Context // nil until startup, which Wails runs in a goroutine
-	ready      bool            // the frontend has asked for its start files
-	startFiles []string        // from the command line, a second launch or the OS
-	settings   settings.Settings
+	dragCancel   context.CancelFunc
+	dragReady    bool
+	started      chan struct{}
+	remote       *session.Client
+	position     *session.Position
+	mu           sync.Mutex
+	ctx          context.Context
+	cancel       context.CancelFunc
+	ready        bool
+	closing      bool
+	initialMu    sync.Mutex
+	shutdownOnce sync.Once
 }
 
-func NewApp(startFiles []string, s settings.Settings) *App {
-	a := &App{startFiles: startFiles, settings: s}
-	a.store = store.New(s.LiveReload, func(info *store.Info) {
-		if ctx := a.context(); ctx != nil {
-			runtime.EventsEmit(ctx, "doc:changed", info)
-		}
-	})
-	return a
+func NewApp(remote *session.Client, position *session.Position) *App {
+	return &App{remote: remote, position: position, started: make(chan struct{})}
 }
-
-// context returns the Wails context, or nil before startup.
-func (a *App) context() context.Context {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.ctx
-}
-
+func (a *App) context() context.Context { a.mu.Lock(); defer a.mu.Unlock(); return a.ctx }
 func (a *App) startup(ctx context.Context) {
 	a.mu.Lock()
-	a.ctx = ctx
-	var queued []string
-	if a.ready {
-		queued, a.startFiles = a.startFiles, nil
-	}
-	a.mu.Unlock()
-	a.openPaths(queued)
-}
-
-func (a *App) shutdown(context.Context) {
-	a.store.CloseAll()
-}
-
-// openPaths hands files opened from outside (a second launch, the macOS
-// open-file event) to the frontend, or queues them until both it and the
-// Wails context are ready.
-func (a *App) openPaths(paths []string) {
-	if len(paths) == 0 {
-		return
-	}
-	a.mu.Lock()
-	ctx := a.ctx
-	if !a.ready || ctx == nil {
-		a.startFiles = append(a.startFiles, paths...)
+	if a.closing {
+		close(a.started)
 		a.mu.Unlock()
 		return
 	}
+	a.ctx = ctx
 	a.mu.Unlock()
-	runtime.EventsEmit(ctx, "open:paths", paths)
-	runtime.WindowUnminimise(ctx)
-	runtime.WindowShow(ctx)
+	native.Init()
+	if a.position != nil {
+		placeWindow(ctx, *a.position)
+	}
+	close(a.started)
 }
-
-func (a *App) openFromOS(path string) { a.openPaths([]string{path}) }
-
-func (a *App) secondInstance(d options.SecondInstanceData) {
-	var paths []string
-	for _, p := range fileArgs(d.Args) {
-		if !filepath.IsAbs(p) {
-			p = filepath.Join(d.WorkingDirectory, p)
+func (a *App) shutdown(context.Context) {
+	a.shutdownOnce.Do(func() {
+		a.mu.Lock()
+		a.closing = true
+		if a.dragCancel != nil {
+			a.dragCancel()
 		}
-		paths = append(paths, p)
-	}
-	if len(paths) > 0 {
-		a.openPaths(paths)
-		return
-	}
-	// Just bring the window forward. Before startup it is about to appear
-	// anyway, and the runtime can't be called yet.
-	if ctx := a.context(); ctx != nil {
-		runtime.WindowUnminimise(ctx)
-		runtime.WindowShow(ctx)
-	}
-}
-
-// Initial returns the files to open at start.
-func (a *App) Initial() []string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.ready = true
-	paths := a.startFiles
-	a.startFiles = nil
-	for i, p := range paths {
-		if abs, err := filepath.Abs(p); err == nil {
-			paths[i] = abs
+		if a.cancel != nil {
+			a.cancel()
 		}
-	}
-	return paths
-}
-
-// PickFile asks for a markdown file and returns its path, or "" if
-// cancelled. dirOf is the key of an open document whose folder to start in.
-func (a *App) PickFile(dirOf int) (string, error) {
-	return runtime.OpenFileDialog(a.context(), runtime.OpenDialogOptions{
-		Title:            "Open markdown file",
-		DefaultDirectory: a.store.Dir(dirOf),
-		Filters: []runtime.FileFilter{
-			{DisplayName: "Markdown (*.md, *.markdown)", Pattern: "*.md;*.markdown;*.mdown;*.mkd;*.mkdn;*.mdx;*.txt"},
-			{DisplayName: "All files", Pattern: "*.*"},
-		},
+		a.mu.Unlock()
+		native.End()
+		if a.remote != nil {
+			_ = a.remote.Unregister()
+		}
 	})
 }
 
-// Open parses a file as a new document.
-func (a *App) Open(path string) (*store.Info, error) { return a.store.Open(path) }
-
-// Close forgets a document when its tab closes.
-func (a *App) Close(key int) { a.store.Close(key) }
-
-// Reload parses a document's file again. The result has a new id.
-func (a *App) Reload(key int) (*store.Info, error) { return a.store.Reload(key) }
-
-// ResolveLink turns a relative link in a document into an absolute path.
-func (a *App) ResolveLink(key int, href string) (string, error) { return a.store.Resolve(key, href) }
-
-// Chunk returns the HTML of chunk i of document id.
-func (a *App) Chunk(id, i int) (string, error) {
-	d, err := a.store.Get(id)
-	if err != nil {
-		return "", err
-	}
-	return d.ChunkHTML(i)
+func (a *App) beforeClose(ctx context.Context) bool {
+	a.shutdown(ctx)
+	return false
 }
 
-// Search returns match counts per chunk.
-func (a *App) Search(id int, q string) ([]int, error) {
-	d, err := a.store.Get(id)
-	if err != nil {
+func (a *App) Initial() ([]string, error) {
+	a.initialMu.Lock()
+	defer a.initialMu.Unlock()
+	a.mu.Lock()
+	if a.closing {
+		a.mu.Unlock()
+		return nil, errors.New("window is closing")
+	}
+	if a.ready {
+		a.mu.Unlock()
+		return nil, nil
+	}
+	a.mu.Unlock()
+	native.Init()
+	if err := a.remote.Register(); err != nil {
 		return nil, err
 	}
-	return d.Search(q), nil
+	ctx, cancel := context.WithCancel(context.Background())
+	a.mu.Lock()
+	if a.closing {
+		a.mu.Unlock()
+		cancel()
+		_ = a.remote.Unregister()
+		return nil, errors.New("window is closing")
+	}
+	a.ready = true
+	a.cancel = cancel
+	a.mu.Unlock()
+	go a.events(ctx)
+	return nil, nil
 }
-
-// SetTitle sets the window title from the active tab's file name.
+func (a *App) events(ctx context.Context) {
+	select {
+	case <-a.started:
+	case <-ctx.Done():
+		return
+	}
+	for {
+		events, err := a.remote.Poll(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			if c := a.context(); c != nil {
+				runtime.EventsEmit(c, "doc:error", "Window coordinator disconnected: "+err.Error())
+			}
+			return
+		}
+		for _, event := range events {
+			event = a.remote.DecorateEvent(event)
+			c := a.context()
+			if c == nil {
+				continue
+			}
+			switch event.Name {
+			case "window:focus", "open:paths":
+				runtime.WindowUnminimise(c)
+				runtime.WindowShow(c)
+			case "settings:changed":
+				s, err := a.remote.Settings()
+				if err == nil {
+					a.theme(s)
+				}
+			}
+			if event.Name == "tab:hover" || event.Name == "tab:drop" {
+				var point session.DragPoint
+				b, _ := json.Marshal(event.Data)
+				if json.Unmarshal(b, &point) != nil {
+					continue
+				}
+				x, y, valid := native.ClientPoint(point.Position.X, point.Position.Y)
+				event.Data = map[string]any{"token": point.Token, "x": x, "y": y, "valid": valid}
+			}
+			runtime.EventsEmit(c, event.Name, event.Data)
+		}
+	}
+}
+func (a *App) openFromOS(path string) { _ = session.Launch([]string{path}) }
+func (a *App) PickFile(dirOf int) (string, error) {
+	return runtime.OpenFileDialog(a.context(), runtime.OpenDialogOptions{Title: "Open markdown file", DefaultDirectory: a.remote.Dir(dirOf), Filters: []runtime.FileFilter{{DisplayName: "Markdown (*.md, *.markdown)", Pattern: "*.md;*.markdown;*.mdown;*.mkd;*.mkdn;*.mdx;*.txt"}, {DisplayName: "All files", Pattern: "*.*"}}})
+}
+func (a *App) Open(path string) (*store.Info, error) {
+	r, e := a.remote.Open(path)
+	if e != nil {
+		return nil, e
+	}
+	return r.Info, nil
+}
+func (a *App) Close(key int) error                              { return a.remote.Close(key) }
+func (a *App) Reload(key int) (*store.Info, error)              { return a.remote.Reload(key) }
+func (a *App) ResolveLink(key int, href string) (string, error) { return a.remote.Resolve(key, href) }
+func (a *App) Chunk(id, i int) (string, error)                  { return a.remote.Chunk(id, i) }
+func (a *App) Search(id int, q string) ([]int, error)           { return a.remote.Search(id, q) }
 func (a *App) SetTitle(name string) {
 	t := appName
 	if name != "" {
 		t = name + " – " + appName
 	}
-	runtime.WindowSetTitle(a.context(), t)
-}
-
-// Settings returns the saved settings.
-func (a *App) Settings() settings.Settings {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.settings
-}
-
-// SaveSettings stores settings and applies the parts Go owns.
-func (a *App) SaveSettings(s settings.Settings) error {
-	a.saveMu.Lock()
-	defer a.saveMu.Unlock()
-	s = s.Clean()
-	if err := settings.Save(s); err != nil {
-		return err
+	if c := a.context(); c != nil {
+		runtime.WindowSetTitle(c, t)
 	}
-	a.mu.Lock()
-	themeChanged := s.Theme != a.settings.Theme
-	liveChanged := s.LiveReload != a.settings.LiveReload
-	a.settings = s
-	a.mu.Unlock()
-	if liveChanged {
-		a.store.SetLive(s.LiveReload)
-	}
-	if themeChanged {
-		if ctx := a.context(); ctx != nil {
-			if s.Theme == "light" {
-				runtime.WindowSetLightTheme(ctx)
-			} else {
-				runtime.WindowSetDarkTheme(ctx)
-			}
+}
+func (a *App) Settings() (settings.Settings, error)   { return a.remote.Settings() }
+func (a *App) SaveSettings(s settings.Settings) error { return a.remote.SaveSettings(s) }
+func (a *App) theme(s settings.Settings) {
+	if c := a.context(); c != nil {
+		if s.Theme == "light" {
+			runtime.WindowSetLightTheme(c)
+		} else {
+			runtime.WindowSetDarkTheme(c)
 		}
 	}
-	return nil
+}
+func (a *App) FocusWindow() error        { return a.remote.Focus() }
+func (a *App) TabOrder(keys []int) error { return a.remote.Order(keys) }
+func (a *App) BeginTransfer(key int, state session.TabState) (string, error) {
+	return a.remote.Begin(key, state)
+}
+func (a *App) AcceptTransfer(tok string, index int) error { return a.remote.Accept(tok, index) }
+func (a *App) AcknowledgeTransfer(tok string, parse int) (*session.Offer, error) {
+	a.mu.Lock()
+	closing := a.closing
+	a.mu.Unlock()
+	if closing || !native.Visible() {
+		return nil, errors.New("destination window is not visible")
+	}
+	return a.remote.Ack(tok, parse)
 }
 
-// OpenURL opens a web link in the system browser.
+// WindowReady proves native visibility independently of a running hidden web view.
+func (a *App) WindowReady() error {
+	a.mu.Lock()
+	closing := a.closing
+	c := a.ctx
+	a.mu.Unlock()
+	if closing || c == nil {
+		return errors.New("window is not available")
+	}
+	ctx, cancel := context.WithTimeout(c, 2*time.Second)
+	defer cancel()
+	select {
+	case <-a.started:
+	case <-ctx.Done():
+		return errors.New("window startup did not finish")
+	}
+	runtime.WindowUnminimise(c)
+	runtime.WindowShow(c)
+	if err := waitVisible(ctx, native.Visible); err != nil {
+		return err
+	}
+	return a.remote.WindowReady()
+}
+
+func waitVisible(ctx context.Context, visible func() bool) error {
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if visible() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return errors.New("destination window could not be shown")
+		case <-tick.C:
+		}
+	}
+}
+
+func (a *App) domReady(ctx context.Context) {
+	a.mu.Lock()
+	closing := a.closing
+	a.mu.Unlock()
+	if !closing && a.position != nil {
+		runtime.WindowShow(ctx)
+	}
+}
+func (a *App) CancelTransfer(tok string) error           { return a.remote.Cancel(tok) }
+func (a *App) DiscardTransfer(tok string, key int) error { return a.remote.Discard(tok, key) }
+func (a *App) CloseWindow() {
+	if c := a.context(); c != nil {
+		a.shutdown(c)
+		runtime.Quit(c)
+	}
+}
 func (a *App) OpenURL(u string) {
 	pu, err := url.Parse(u)
 	if err != nil {
@@ -219,13 +274,97 @@ func (a *App) OpenURL(u string) {
 	default:
 		return
 	}
-	runtime.BrowserOpenURL(a.context(), pu.String())
+	if c := a.context(); c != nil {
+		runtime.BrowserOpenURL(c, pu.String())
+	}
+}
+func (a *App) Print() {
+	if c := a.context(); c != nil {
+		runtime.WindowPrint(c)
+	}
+}
+func (a *App) Version() string { return version }
+
+func (a *App) StartTabDrag(tok string, state session.TabState) error {
+	a.mu.Lock()
+	closing := a.closing
+	a.mu.Unlock()
+	if closing {
+		return errors.New("window is closing")
+	}
+	var pids []int
+	var err error
+	if native.DragFeedback {
+		pids, err = a.remote.StartFeedback(tok, state)
+	} else {
+		err = a.remote.Start(tok, state)
+	}
+	if err != nil {
+		return err
+	}
+	dragReady := native.StartForTab(tok, pids)
+	a.mu.Lock()
+	if a.closing {
+		a.mu.Unlock()
+		native.End()
+		return errors.New("window is closing")
+	}
+	if a.dragCancel != nil {
+		a.dragCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.dragCancel = cancel
+	a.dragReady = dragReady
+	a.mu.Unlock()
+	go func() {
+		ticker := time.NewTicker(40 * time.Millisecond)
+		defer ticker.Stop()
+		ticks := 0
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				ticks++
+				if native.DragFeedback && ticks%5 == 0 {
+					refresh, stop := context.WithTimeout(ctx, 250*time.Millisecond)
+					pids, err := a.remote.DragWindows(refresh, tok)
+					stop()
+					if ctx.Err() != nil {
+						return
+					}
+					if err != nil {
+						// Losing feedback never prevents the existing detach path.
+						native.UpdateDragWindows(tok, nil)
+						return
+					}
+					native.UpdateDragWindows(tok, pids)
+				}
+				point := native.Cursor()
+				if ctx.Err() != nil {
+					return
+				}
+				if point.Valid {
+					if a.remote.Hover(ctx, tok, point.PID, session.Position{X: point.X, Y: point.Y}) != nil {
+						return
+					}
+				}
+			}
+		}
+	}()
+	return nil
+}
+func (a *App) EndTabDrag(tok string, cancelled bool) error {
+	a.mu.Lock()
+	dragReady := a.dragReady
+	a.dragReady = false
+	if a.dragCancel != nil {
+		a.dragCancel()
+		a.dragCancel = nil
+	}
+	a.mu.Unlock()
+	result := native.End()
+	return a.remote.End(tok, cancelled || !dragReady || !result.Valid || result.Cancelled, result.PID, session.Position{X: result.X, Y: result.Y})
 }
 
-// Print opens the system print dialog, from which a PDF can be saved. On
-// Windows and Linux this is window.print(); macOS uses a native print
-// operation because its web view ignores window.print().
-func (a *App) Print() { runtime.WindowPrint(a.context()) }
-
-// Version returns the build version.
-func (a *App) Version() string { return version }
+func (a *App) TransferInfo(tok string) (*session.Offer, error) { return a.remote.OfferInfo(tok) }

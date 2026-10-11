@@ -4,11 +4,12 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/subtle"
+	"github.com/penguin97040/md-viewer/internal/session"
 	"io"
 	"io/fs"
 	"net/http"
-	"os"
 	"path"
+	"strconv"
 	"strings"
 
 	"github.com/penguin97040/md-viewer/internal/doc"
@@ -19,16 +20,16 @@ import (
 // assetHandler serves what the embedded files cannot: images next to the
 // open document, highlight colours, and gzipped vendor scripts.
 type assetHandler struct {
-	files fs.FS
-	store *store.Store
+	files  fs.FS
+	remote *session.Client
 }
 
 func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
 	switch {
 	case strings.HasPrefix(p, "/local/"):
-		h.serveLocal(w, r, store.LocalPath(p))
-	case subtle.ConstantTimeCompare([]byte(p), []byte(h.store.WebPath())) == 1:
+		h.serveLocal(w, r, p)
+	case subtle.ConstantTimeCompare([]byte(p), []byte(h.remote.WebPath())) == 1:
 		webimage.Serve(w, r)
 	case p == "/highlight.css":
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
@@ -55,12 +56,23 @@ func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // local files into the page, and not from other computers (see
 // store.Reachable).
 func (h *assetHandler) serveLocal(w http.ResponseWriter, r *http.Request, p string) {
-	ct, ok := store.ImageType(p)
-	if !ok || !h.store.Reachable(p) {
+	parts := strings.SplitN(strings.TrimPrefix(p, "/local/"), "/", 2)
+	if len(parts) != 2 {
 		http.NotFound(w, r)
 		return
 	}
-	b, err := os.ReadFile(p)
+	key, err := strconv.Atoi(parts[0])
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	p = store.LocalPath("/local/" + parts[1])
+	ct, ok := store.ImageType(p)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	b, err := h.remote.Local(key, p)
 	if err != nil {
 		http.NotFound(w, r)
 		return

@@ -2,9 +2,11 @@ package main
 
 import (
 	"embed"
+	"github.com/penguin97040/md-viewer/internal/session"
 	"io/fs"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/wailsapp/wails/v2"
@@ -24,13 +26,51 @@ var version = "dev"
 var embedded embed.FS
 
 func main() {
+	var remote *session.Client
+	var position *session.Position
+	if !bindingMode {
+		switch {
+		case len(os.Args) == 2 && os.Args[1] == "--coordinator":
+			if err := session.RunCoordinator(); err != nil {
+				log.Fatal(err)
+			}
+			return
+		case len(os.Args) == 2 && os.Args[1] == "--window":
+			b, err := session.ReadBootstrap()
+			if err != nil {
+				log.Fatal(err)
+			}
+			remote, err = session.NewClient(b)
+			if err != nil {
+				log.Fatal(err)
+			}
+			position = b.Position
+		default:
+			paths := fileArgs(os.Args[1:])
+			for i, p := range paths {
+				if abs, e := filepath.Abs(p); e == nil {
+					paths[i] = abs
+				}
+			}
+			if err := session.Launch(paths); err != nil {
+				log.Fatal(err)
+			}
+			return
+		}
+	}
+
 	files, err := fs.Sub(embedded, "frontend")
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	s := settings.Load()
-	app := NewApp(fileArgs(os.Args[1:]), s)
+	if remote != nil {
+		if saved, e := remote.Settings(); e == nil {
+			s = saved
+		}
+	}
+	app := NewApp(remote, position)
 
 	bg := &options.RGBA{R: 0x17, G: 0x19, B: 0x1e, A: 255}
 	winTheme := windows.Dark
@@ -48,21 +88,19 @@ func main() {
 		BackgroundColour: bg,
 		AssetServer: &assetserver.Options{
 			Assets:  files,
-			Handler: &assetHandler{files: files, store: app.store},
+			Handler: &assetHandler{files: files, remote: remote},
 		},
 		DragAndDrop: &options.DragAndDrop{
 			EnableFileDrop:     true,
-			DisableWebViewDrop: true,
+			DisableWebViewDrop: false,
 		},
-		OnStartup:  app.startup,
-		OnShutdown: app.shutdown,
-		Bind:       []any{app},
+		OnStartup:     app.startup,
+		OnDomReady:    app.domReady,
+		OnBeforeClose: app.beforeClose,
+		OnShutdown:    app.shutdown,
+		Bind:          []any{app},
 		Windows: &windows.Options{
 			Theme: winTheme,
-		},
-		SingleInstanceLock: &options.SingleInstanceLock{
-			UniqueId:               "io.github.penguin97040.mdviewer",
-			OnSecondInstanceLaunch: app.secondInstance,
 		},
 		Mac: &mac.Options{
 			OnFileOpen: app.openFromOS,

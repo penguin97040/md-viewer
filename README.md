@@ -14,8 +14,8 @@ executable with no installer and no runtime to set up.
 </p>
 <p align="center"><sub>Click a screenshot to see it full size.</sub></p>
 
-- Tabs: open several files at once; opening another file from Explorer or
-  Finder adds a tab to the window that's already open
+- Tabs: open several files at once, reorder them or move them between windows;
+  opening a file again switches to its existing tab
 - Dark mode by default, with a light theme
 - GitHub-flavoured markdown: tables, task lists, footnotes, strikethrough,
   autolinks, definition lists and raw HTML (sanitised)
@@ -52,6 +52,16 @@ command line. Each file gets its own tab:
 ```
 md-viewer notes.md README.md
 ```
+
+Drag a tab along the strip to reorder it, outside the viewer to open a new
+window, or onto another window's tab strip to move it there. Press Escape to
+cancel. Dropping inside a document cancels the move. Reading position and image
+consent follow the tab; its source window closes if it has no tabs left.
+Detaching by an outside drop requires Windows, macOS or Linux with X11;
+on Wayland, an outside drop cancels the move.
+
+Files stay open in one tab across all windows. New files from another launch
+open in the most recently focused window. Tabs aren't restored on startup.
 
 To make it the default app for `.md` files on Windows, right-click a markdown
 file, choose **Open with › Choose another app**, browse to `md-viewer.exe` and
@@ -95,7 +105,7 @@ Settings are saved to `md-viewer/settings.json` in your user config folder
 
 ## Building from source
 
-You need [Go](https://go.dev/dl/) 1.26.6 or newer and the
+You need [Go](https://go.dev/dl/) 1.26.9 or newer and the
 [Wails v2](https://wails.io/docs/gettingstarted/installation) CLI:
 
 ```

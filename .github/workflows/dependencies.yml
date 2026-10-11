@@ -33,6 +33,10 @@ jobs:
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
       - name: Install scanner
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+      - name: Test and vet production packages
+        run: |
+          go test -tags desktop,production,webkit2_41 ./...
+          go vet -tags desktop,production,webkit2_41 ./...
       - name: Scan production sources and full module graph
         run: |
           govulncheck -tags desktop,production,webkit2_41 ./...
