@@ -35,6 +35,10 @@ jobs:
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
       - name: Test and vet production packages
         run: |
+          # Wails adds this framework when building; direct Go tests need it too.
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            export CGO_LDFLAGS="${CGO_LDFLAGS:+$CGO_LDFLAGS }-framework UniformTypeIdentifiers"
+          fi
           go test -tags desktop,production,webkit2_41 ./...
           go vet -tags desktop,production,webkit2_41 ./...
       - name: Scan production sources and full module graph

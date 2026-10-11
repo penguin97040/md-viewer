@@ -638,7 +638,11 @@ func TestPendingLaunchSurvivesLastTabMove(t *testing.T) {
 	drain(s, b)
 	s.Unregister(a)
 	q := drain(s, b)
-	if len(q) != 1 || q[0].Name != "open:paths" || q[0].Data.([]string)[0] != pending {
+	expected, err := canonical(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(q) != 1 || q[0].Name != "open:paths" || pathKey(q[0].Data.([]string)[0]) != pathKey(expected) {
 		t.Fatal("pending launch was lost", q)
 	}
 	opened(t, s, b, pending)
