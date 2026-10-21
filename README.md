@@ -3,6 +3,11 @@
 A small, fast markdown viewer for Windows, macOS and Linux. It's a single
 executable with no installer and no runtime to set up.
 
+This experimental branch applies Netherbase styling: bundled fonts, square
+controls and a black-and-orange default theme, with light mode still available.
+The title bar is integrated into the app, with native traffic lights on macOS.
+On narrow windows, **More actions** contains Print and Settings.
+
 <p align="center">
   <a href="docs/screenshots/dark.png"><img src="docs/screenshots/dark.png" width="560" alt="MD Viewer in the dark theme, with tabs, a table of contents, a table and a diagram"></a>
 </p>
@@ -19,7 +24,7 @@ executable with no installer and no runtime to set up.
 - Dark mode by default, with a light theme
 - GitHub-flavoured markdown: tables, task lists, footnotes, strikethrough,
   autolinks, definition lists and raw HTML (sanitised)
-- Syntax highlighting for fenced code blocks, with a one-click copy button
+- Syntax highlighting for fenced code blocks, with an always-visible copy button
 - Sortable tables: click a column heading to sort it
 - Save as PDF or print, always in light colours
 - Mermaid diagrams and KaTeX maths, drawn in the app (no internet needed)
@@ -122,6 +127,11 @@ wails build -tags webkit2_41                  # Linux with WebKitGTK 4.1
 
 The executable is written to `build/bin/`. Linux builds need
 `libgtk-3-dev` and `libwebkit2gtk-4.1-dev`.
+
+Theme colours are generated from `design/tokens.json`. After changing the
+source tokens, run `python3 scripts/generate-theme.py` and include the generated
+CSS and native background in the same commit. Fonts and their licences are
+bundled under `frontend/fonts/`; no fonts are downloaded at runtime.
 
 Run the tests with `go test ./...`. For quick work on the interface,
 `go run ./cmd/devserver file.md` serves the frontend to an ordinary browser at

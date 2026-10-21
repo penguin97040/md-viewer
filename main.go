@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/wailsapp/wails/v2"
@@ -72,7 +73,7 @@ func main() {
 	}
 	app := NewApp(remote, position)
 
-	bg := &options.RGBA{R: 0x17, G: 0x19, B: 0x1e, A: 255}
+	bg := &options.RGBA{R: darkBackground[0], G: darkBackground[1], B: darkBackground[2], A: 255}
 	winTheme := windows.Dark
 	if s.Theme == "light" {
 		bg = &options.RGBA{R: 255, G: 255, B: 255, A: 255}
@@ -81,6 +82,7 @@ func main() {
 
 	err = wails.Run(&options.App{
 		Title:            appName,
+		Frameless:        runtime.GOOS != "darwin",
 		Width:            1100,
 		Height:           820,
 		MinWidth:         420,
@@ -100,10 +102,12 @@ func main() {
 		OnShutdown:    app.shutdown,
 		Bind:          []any{app},
 		Windows: &windows.Options{
-			Theme: winTheme,
+			Theme:                             winTheme,
+			DisableFramelessWindowDecorations: true,
 		},
 		Mac: &mac.Options{
 			OnFileOpen: app.openFromOS,
+			TitleBar:   mac.TitleBarHiddenInset(),
 		},
 		Linux: &linux.Options{
 			ProgramName: "md-viewer",

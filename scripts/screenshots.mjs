@@ -8,9 +8,7 @@
 //   node scripts/screenshots.mjs
 //
 // PLAYWRIGHT defaults to the "playwright" package; CHROME_PATH to
-// Playwright's own browser. For Windows-like text on Linux, install the
-// Selawik font and alias "Segoe UI" to it in fontconfig, and install
-// Cascadia Code.
+// Playwright's own browser. The app bundles the fonts used in screenshots.
 
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -54,7 +52,7 @@ async function scrollTo(page, id, offset = 24) {
 }
 
 async function shot(page, name) {
-  await page.mouse.move(1100, 20); // park the pointer on the empty tab strip
+  await page.mouse.move(80, 24); // park the pointer on the app title
   await settle(page, 300);
   await page.screenshot({ path: path.join(out, name) });
   console.log('wrote', name);

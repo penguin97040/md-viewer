@@ -196,9 +196,9 @@ function addCopyButtons(root) {
     if (block.querySelector(':scope > .copy')) continue;
     const b = document.createElement('button');
     b.className = 'copy';
-    b.title = 'Copy';
+    b.title = 'Copy code';
     b.setAttribute('aria-label', 'Copy code');
-    b.innerHTML = COPY_ICON;
+    b.innerHTML = COPY_ICON + '<span aria-live="polite">Copy</span>';
     block.append(b);
   }
 }
@@ -268,17 +268,31 @@ export function installInteractions(copyText) {
     const btn = e.target.closest('.md .copy');
     if (btn) {
       e.preventDefault();
+      if (btn.disabled) return;
+      btn.disabled = true;
+      clearTimeout(btn._t);
       const code = btn.parentElement.querySelector('pre')?.textContent ?? '';
       try {
         await copyText(code.replace(/\n$/, ''));
-        btn.innerHTML = DONE_ICON;
+        btn.innerHTML = DONE_ICON + '<span aria-live="polite">Copied</span>';
+        btn.setAttribute('aria-label', 'Copied');
+        btn.title = 'Copied';
         btn.classList.add('done');
         clearTimeout(btn._t);
         btn._t = setTimeout(() => {
-          btn.innerHTML = COPY_ICON;
+          btn.innerHTML = COPY_ICON + '<span aria-live="polite">Copy</span>';
+          btn.setAttribute('aria-label', 'Copy code');
+          btn.title = 'Copy code';
           btn.classList.remove('done');
         }, 1200);
-      } catch { /* clipboard unavailable */ }
+      } catch {
+        btn.classList.remove('done');
+        btn.textContent = 'Try again';
+        btn.title = 'Copy failed. Try again.';
+        btn.setAttribute('aria-label', 'Copy failed. Try again.');
+      } finally {
+        btn.disabled = false;
+      }
       return;
     }
     const th = e.target.closest('.md th.sortable');

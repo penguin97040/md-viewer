@@ -35,7 +35,11 @@ async function events() {
   catch(e){running=false;for(const fn of handlers.get('doc:error')||[])fn(e.message);}
  }
 }
+let previewMaximised = false;
 window.runtime = {
+  WindowMinimise() {},
+  WindowToggleMaximise() { previewMaximised = !previewMaximised; window.dispatchEvent(new Event('resize')); },
+  WindowIsMaximised: async () => previewMaximised,
  EventsOn(name,fn){if(!handlers.has(name))handlers.set(name,[]);handlers.get(name).push(fn);},
  EventsOff(name){handlers.delete(name);},OnFileDrop(){},
  ClipboardSetText:t=>navigator.clipboard.writeText(t).then(()=>true,()=>false),

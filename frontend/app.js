@@ -1,3 +1,4 @@
+import { installHeader } from './windowbar.js';
 import { Tabs, pathKey } from './tabs.js';
 import { installMovement } from './movement.js';
 import { Toc } from './toc.js';
@@ -12,6 +13,7 @@ const shell = new Map([...document.querySelectorAll('[id]')].map((el) => [el.id,
 const $ = (id) => shell.get(id);
 const html = document.documentElement;
 const isMac = navigator.platform.toUpperCase().includes('MAC');
+installHeader({ rt, go, shell, isMac });
 
 const tocNav = $('toc');
 const baseEl = $('base');

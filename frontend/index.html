@@ -8,12 +8,14 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; form-action 'none'; base-uri 'self'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MD Viewer</title>
+<link rel="stylesheet" href="/theme.css">
 <link rel="stylesheet" href="/style.css">
 <link rel="stylesheet" href="/highlight.css">
 <base id="base" href="/">
 </head>
 <body>
 <header id="bar">
+  <span id="app-title"><img src="/appicon.png" width="22" height="22" alt="">MD Viewer</span>
   <button id="btn-toc" class="icon" title="Contents (Ctrl+B)" aria-label="Contents">
     <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h13"/></svg>
   </button>
@@ -27,12 +29,22 @@
   <button id="btn-find" class="icon" title="Find (Ctrl+F)" aria-label="Find">
     <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
   </button>
-  <button id="btn-print" class="icon" title="Save as PDF / Print (Ctrl+P)" aria-label="Save as PDF or print">
-    <svg viewBox="0 0 24 24"><path d="M7 9V4h10v5M7 17H5a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-2"/><path d="M7 14h10v6H7z"/></svg>
+  <div id="tools">
+    <button id="btn-print" class="icon" title="Save as PDF / Print (Ctrl+P)" aria-label="Save as PDF or print">
+      <svg viewBox="0 0 24 24"><path d="M7 9V4h10v5M7 17H5a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-2"/><path d="M7 14h10v6H7z"/></svg>
+    </button>
+    <button id="btn-settings" class="icon" title="Settings" aria-label="Settings">
+      <svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+    </button>
+  </div>
+  <button id="btn-tools" class="icon" title="More actions" aria-label="More actions" aria-expanded="false" aria-controls="tools">
+    <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
   </button>
-  <button id="btn-settings" class="icon" title="Settings" aria-label="Settings">
-    <svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
-  </button>
+  <div id="window-controls" aria-label="Window controls">
+    <button id="win-minimise" class="icon" title="Minimise" aria-label="Minimise"><svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>
+    <button id="win-maximise" class="icon" title="Maximise" aria-label="Maximise"><svg viewBox="0 0 24 24"><path id="maximise-path" d="M6 6h12v12H6z"/></svg></button>
+    <button id="win-close" class="icon" title="Close window" aria-label="Close window"><svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+  </div>
 </header>
 
 <div id="findbar" hidden>
@@ -71,6 +83,13 @@
   <label class="row"><span>Wrap code and tables</span><input type="checkbox" data-key="wrap"></label>
   <label class="row"><span>Live reload</span><input type="checkbox" data-key="liveReload"></label>
   <div class="foot"><span id="version"></span><button id="reset" class="link">Reset</button></div>
+  <div class="nz"><svg viewBox="0 0 24 30" aria-hidden="true">
+    <polygon points="12.0,0.6 12.8,2.9 15.2,2.9 13.2,4.4 14.0,6.8 12.0,5.3 10.0,6.8 10.8,4.4 8.8,2.9 11.2,2.9"/>
+    <polygon points="4.5,10.1 5.3,12.4 7.7,12.4 5.7,13.9 6.5,16.3 4.5,14.8 2.5,16.3 3.3,13.9 1.3,12.4 3.7,12.4"/>
+    <polygon points="19.0,8.8 19.6,10.7 21.6,10.7 20.0,11.8 20.6,13.7 19.0,12.5 17.4,13.7 18.0,11.8 16.4,10.7 18.4,10.7"/>
+    <polygon points="12.0,21.7 12.9,24.3 15.6,24.3 13.4,25.9 14.2,28.6 12.0,27.0 9.8,28.6 10.6,25.9 8.4,24.3 11.1,24.3"/>
+  </svg>Aotearoa New Zealand</div>
+  <div class="font-licences"><a href="/fonts/OFL-ChakraPetch.txt" data-licence>Chakra Petch licence</a> · <a href="/fonts/OFL-ShareTechMono.txt" data-licence>Share Tech Mono licence</a></div>
 </div>
 
 <main>
@@ -84,6 +103,7 @@
   </div>
 </main>
 <div id="toast" hidden></div>
+<dialog id="licence-dialog"><button id="licence-close" class="link">Close</button><pre id="licence-text"></pre></dialog>
 
 <script type="module" src="/app.js"></script>
 </body>

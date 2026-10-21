@@ -4,6 +4,8 @@ MD Viewer bundles or links the following open-source software.
 
 | Component | Version | Licence | Use |
 |---|---|---|---|
+| Chakra Petch | bundled regular and semibold | SIL OFL 1.1 | Headings and body text |
+| Share Tech Mono | bundled regular | SIL OFL 1.1 | App labels and code |
 | [Mermaid](https://github.com/mermaid-js/mermaid) | 12.1.0 | MIT | Diagrams (`frontend/vendor/mermaid.min.js.gz`) |
 | [DOMPurify](https://github.com/cure53/DOMPurify) | 3.4.16 | Apache-2.0 OR MPL-2.0 | HTML sanitising inside Mermaid |
 | [KaTeX](https://github.com/KaTeX/KaTeX) | 0.19.0 | MIT | Maths (`frontend/vendor/katex/`) |
@@ -26,3 +28,5 @@ integrity hashes and overrides, is locked in `scripts/vendor/package-lock.json`.
 `frontend/vendor/LICENSE-mermaid-dependencies.txt` contains the licence texts
 for all packages included in the Mermaid bundle. esbuild and fflate are
 maintenance tools and are not shipped as executable code.
+
+Bundled font licence texts are in `frontend/fonts/` and available in Settings.

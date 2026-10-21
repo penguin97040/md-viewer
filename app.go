@@ -184,8 +184,10 @@ func (a *App) theme(s settings.Settings) {
 	if c := a.context(); c != nil {
 		if s.Theme == "light" {
 			runtime.WindowSetLightTheme(c)
+			runtime.WindowSetBackgroundColour(c, 255, 255, 255, 255)
 		} else {
 			runtime.WindowSetDarkTheme(c)
+			runtime.WindowSetBackgroundColour(c, darkBackground[0], darkBackground[1], darkBackground[2], 255)
 		}
 	}
 }

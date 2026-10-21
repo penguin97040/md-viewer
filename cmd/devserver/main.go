@@ -25,7 +25,11 @@ import (
 )
 
 const shim = `
+let previewMaximised = false;
 window.runtime = {
+  WindowMinimise() {},
+  WindowToggleMaximise() { previewMaximised = !previewMaximised; window.dispatchEvent(new Event('resize')); },
+  WindowIsMaximised: async () => previewMaximised,
   EventsOn() {}, EventsOff() {}, OnFileDrop() {},
   ClipboardSetText: (t) => navigator.clipboard.writeText(t).then(() => true, () => false),
 };
@@ -144,7 +148,7 @@ func (s *server) api(w http.ResponseWriter, r *http.Request) {
 			paths = append(paths, abs)
 		}
 		res = paths
-	case "PickFile", "SetTitle", "Print", "OpenURL":
+	case "PickFile", "SetTitle", "Print", "OpenURL", "CloseWindow":
 		res = ""
 	case "Open":
 		var p string
