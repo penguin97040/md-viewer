@@ -338,9 +338,12 @@ main {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  color: var(--muted);
+  color: var(--text);
+  padding: 24px;
+  text-align: center;
   user-select: none;
 }
+#empty > p:first-child { font-size: 20px; line-height: 1.5; font-weight: 600; }
 #empty button {
   margin-top: 6px;
   padding: 7px 16px;
@@ -350,7 +353,7 @@ main {
   cursor: pointer;
 }
 #empty button:hover { background: var(--bg-hover); }
-#empty .hint { font-size: 12px; opacity: .7; }
+#empty .hint { font-family: var(--mono); font-size: 16px; color: var(--text); }
 body.has-doc #empty { display: none; }
 
 #toast {
