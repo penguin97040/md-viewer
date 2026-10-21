@@ -110,7 +110,7 @@ Settings are saved to `md-viewer/settings.json` in your user config folder
 
 ## Building from source
 
-You need [Go](https://go.dev/dl/) 1.26.9 or newer and the
+You need [Go](https://go.dev/dl/) 1.26.10 or newer and the
 [Wails v2](https://wails.io/docs/gettingstarted/installation) CLI:
 
 ```
