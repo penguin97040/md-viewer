@@ -31,7 +31,7 @@ On narrow windows, **More actions** contains Print and Settings.
 - Table of contents sidebar that follows your place in the document
 - Find in document, including parts of large files not yet on screen
 - Live reload when the file changes on disk, plus a reload button
-- Adjustable font size, line spacing, content width and font
+- Adjustable font size, line spacing, document padding and font
 - Word wrap for code blocks and tables, which can be turned off
 - Handles large files (tested to 25 MB) by rendering only what's near the
   screen

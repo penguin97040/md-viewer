@@ -22,18 +22,19 @@ let settings = null;
 
 // ---- Settings ----
 
-const DEFAULTS = { theme: 'dark', wrap: true, fontSize: 17, lineHeight: 1.65, width: 'medium', font: 'sans', liveReload: true, toc: true };
-const LIMITS = { fontSize: [12, 28], lineHeight: [1.2, 2.2] };
-const LAYOUT_KEYS = ['fontSize', 'lineHeight', 'width', 'font', 'wrap', 'toc'];
+const DEFAULTS = { theme: 'dark', wrap: true, fontSize: 17, lineHeight: 1.65, padding: 20, font: 'sans', liveReload: true, toc: true };
+const LIMITS = { fontSize: [12, 28], lineHeight: [1.2, 2.2], padding: [20, 40] };
+const STEPS = { fontSize: 1, lineHeight: 0.05, padding: 4 };
+const LAYOUT_KEYS = ['fontSize', 'lineHeight', 'padding', 'font', 'wrap', 'toc'];
 
 function applySettings(prev) {
   const s = settings;
   html.dataset.theme = s.theme;
   html.dataset.wrap = s.wrap ? 'on' : 'off';
-  html.dataset.width = s.width;
   html.dataset.font = s.font;
   html.style.setProperty('--font-size', s.fontSize + 'px');
   html.style.setProperty('--line-height', String(s.lineHeight));
+  html.style.setProperty('--document-padding', s.padding + 'px');
   tocNav.hidden = !s.toc || !tabs.active;
   $('btn-toc').classList.toggle('on', s.toc);
   syncSettingsUI();
@@ -86,14 +87,16 @@ function syncSettingsUI() {
   }
   for (const st of document.querySelectorAll('.step')) {
     const v = settings[st.dataset.key];
-    st.querySelector('output').textContent = st.dataset.key === 'lineHeight' ? v.toFixed(2) : v;
+    st.querySelector('output').textContent = st.dataset.key === 'lineHeight' ? v.toFixed(2) : st.dataset.key === 'padding' ? `${v} px` : v;
+    st.querySelector('[data-d="-1"]').disabled = v <= LIMITS[st.dataset.key][0];
+    st.querySelector('[data-d="1"]').disabled = v >= LIMITS[st.dataset.key][1];
   }
   for (const cb of document.querySelectorAll('#settings input[type=checkbox]')) cb.checked = settings[cb.dataset.key];
 }
 
 function stepSetting(key, dir) {
   const [lo, hi] = LIMITS[key];
-  const step = key === 'lineHeight' ? 0.05 : 1;
+  const step = STEPS[key];
   const v = Math.round((settings[key] + dir * step) * 100) / 100;
   update({ [key]: Math.min(hi, Math.max(lo, v)) });
 }

@@ -15,7 +15,7 @@ type Settings struct {
 	Wrap       bool    `json:"wrap"`       // wrap code blocks and tables
 	FontSize   int     `json:"fontSize"`   // px
 	LineHeight float64 `json:"lineHeight"` // unitless
-	Width      string  `json:"width"`      // "narrow", "medium" or "full"
+	Padding    int     `json:"padding"`    // px around the document
 	Font       string  `json:"font"`       // "sans" or "serif"
 	LiveReload bool    `json:"liveReload"`
 	TOC        bool    `json:"toc"` // sidebar open
@@ -28,7 +28,7 @@ func Defaults() Settings {
 		Wrap:       true,
 		FontSize:   17,
 		LineHeight: 1.65,
-		Width:      "medium",
+		Padding:    20,
 		Font:       "sans",
 		LiveReload: true,
 		TOC:        true,
@@ -105,11 +105,7 @@ func (s Settings) Clean() Settings {
 	if s.LineHeight < 1.2 || s.LineHeight > 2.2 {
 		s.LineHeight = d.LineHeight
 	}
-	switch s.Width {
-	case "narrow", "medium", "full":
-	default:
-		s.Width = d.Width
-	}
+	s.Padding = min(max(s.Padding, 20), 40)
 	if s.Font != "sans" && s.Font != "serif" {
 		s.Font = d.Font
 	}
