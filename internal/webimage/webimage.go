@@ -83,6 +83,7 @@ var nonPublicRanges = []netip.Prefix{
 	netip.MustParsePrefix("64:ff9b:1::/48"),
 	netip.MustParsePrefix("100::/64"),
 	netip.MustParsePrefix("2001::/32"),
+	netip.MustParsePrefix("2001:2::/48"),
 	netip.MustParsePrefix("2001:10::/28"),
 	netip.MustParsePrefix("2001:20::/28"),
 	netip.MustParsePrefix("2001:db8::/32"),
@@ -90,6 +91,8 @@ var nonPublicRanges = []netip.Prefix{
 	netip.MustParsePrefix("3fff::/20"),
 	netip.MustParsePrefix("5f00::/16"),
 }
+
+var ipv6Global = netip.MustParsePrefix("2000::/3")
 
 func publicIP(ip net.IP) bool {
 	if !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
@@ -100,6 +103,12 @@ func publicIP(ip net.IP) bool {
 		return false
 	}
 	addr = addr.Unmap()
+	// IPv6 IsGlobalUnicast includes deprecated site-local, compatible IPv4
+	// and unallocated addresses. Only the allocated global-unicast space is
+	// eligible, with special-purpose ranges excluded below.
+	if addr.Is6() && !ipv6Global.Contains(addr) {
+		return false
+	}
 	for _, prefix := range nonPublicRanges {
 		if prefix.Contains(addr) {
 			return false
@@ -135,6 +144,10 @@ type Image struct {
 
 // Fetch downloads an image. Anything that isn't an image is refused.
 func Fetch(raw string) (*Image, error) {
+	return fetch(context.Background(), raw)
+}
+
+func fetch(ctx context.Context, raw string) (*Image, error) {
 	if strings.HasPrefix(raw, "//") {
 		raw = "https:" + raw
 	}
@@ -145,7 +158,7 @@ func Fetch(raw string) (*Image, error) {
 	if err := check(u); err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +188,7 @@ func Fetch(raw string) (*Image, error) {
 // Serve writes a fetched image, or a 404 if it can't be had. The URL comes
 // from the u query parameter.
 func Serve(w http.ResponseWriter, r *http.Request) {
-	img, err := Fetch(r.URL.Query().Get("u"))
+	img, err := fetch(r.Context(), r.URL.Query().Get("u"))
 	if err != nil {
 		http.NotFound(w, r)
 		return

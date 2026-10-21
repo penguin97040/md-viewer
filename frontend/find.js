@@ -3,6 +3,10 @@
 
 const HAS_HIGHLIGHT = typeof CSS !== 'undefined' && 'highlights' in CSS && typeof Highlight !== 'undefined';
 const SKIP = 'pre.mermaid, .diagram, .math, .katex, a.footnote-ref, a.footnote-backref, button, script, style';
+// Match Go's unicode.IsSpace and simple rune lower-casing. JavaScript's
+// whole-string conversion expands dotted I and applies contextual sigma.
+const SPACE = /[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/;
+const lower = (ch) => ch === '\u0130' ? 'i' : ch.toLowerCase();
 
 // foldedText walks the text of root, lower-cased with whitespace collapsed
 // (matching Go's foldText), and maps each folded character back to its
@@ -14,45 +18,50 @@ function foldedText(root) {
   let s = '';
   const nodes = [];
   const offs = [];
+  const ends = [];
   let space = true; // trims leading whitespace
   for (let n = walker.nextNode(); n; n = walker.nextNode()) {
     const t = n.data;
-    for (let k = 0; k < t.length; k++) {
-      const ch = t[k];
-      if (/\s/.test(ch)) {
+    for (let k = 0; k < t.length;) {
+      const start = k;
+      const ch = String.fromCodePoint(t.codePointAt(k));
+      k += ch.length;
+      if (SPACE.test(ch)) {
         if (!space) {
           s += ' ';
           nodes.push(n);
-          offs.push(k);
+          offs.push(start);
+          ends.push(k);
           space = true;
         }
         continue;
       }
-      const low = ch.toLowerCase();
+      const low = lower(ch);
       for (let j = 0; j < low.length; j++) {
         s += low[j];
         nodes.push(n);
-        offs.push(k);
+        offs.push(start);
+        ends.push(k);
       }
       space = false;
     }
   }
-  return { s, nodes, offs };
+  return { s, nodes, offs, ends };
 }
 
 function fold(q) {
-  return q.toLowerCase().split(/\s+/).filter(Boolean).join(' ');
+  return Array.from(q, (ch) => SPACE.test(ch) ? ' ' : lower(ch)).join('').split(/ +/).filter(Boolean).join(' ');
 }
 
 function rangesIn(root, q) {
-  const { s, nodes, offs } = foldedText(root);
+  const { s, nodes, offs, ends } = foldedText(root);
   const out = [];
   if (!q) return out;
   for (let at = s.indexOf(q); at >= 0; at = s.indexOf(q, at + q.length)) {
     const end = at + q.length - 1;
     const r = document.createRange();
     r.setStart(nodes[at], offs[at]);
-    r.setEnd(nodes[end], offs[end] + 1);
+    r.setEnd(nodes[end], ends[end]);
     out.push(r);
   }
   return out;
@@ -230,7 +239,9 @@ export class Find {
   mark(ranges, nth) {
     const cur = ranges[nth];
     if (HAS_HIGHLIGHT) {
-      CSS.highlights.set('find', new Highlight(...ranges));
+      const all = new Highlight();
+      for (const range of ranges) all.add(range);
+      CSS.highlights.set('find', all);
       CSS.highlights.set('find-current', new Highlight(cur));
     } else {
       const sel = window.getSelection();

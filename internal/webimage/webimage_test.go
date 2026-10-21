@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCheck(t *testing.T) {
@@ -86,6 +87,49 @@ func TestFetch(t *testing.T) {
 	}
 }
 
+func TestServeCancelsFetch(t *testing.T) {
+	started, cancelled := make(chan struct{}), make(chan struct{})
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		close(started)
+		select {
+		case <-r.Context().Done():
+			close(cancelled)
+		case <-release:
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+	useTestClient(t, srv)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req := httptest.NewRequest("GET", "/web/x?u="+url.QueryEscape("http://image.example/slow.png"), nil).WithContext(ctx)
+	done := make(chan struct{})
+	go func() {
+		Serve(httptest.NewRecorder(), req)
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("image fetch did not start")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("image fetch survived the cancelled request")
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("upstream image connection remained open")
+	}
+}
+
 // The test transport sees a public destination but connects to our local
 // fixture. Production has no exception for local addresses.
 func useTestClient(t *testing.T, srv *httptest.Server) *http.Transport {
@@ -111,6 +155,8 @@ func TestResolvedDestinations(t *testing.T) {
 		{"0.0.0.1"}, {"198.18.0.1"}, {"240.0.0.1"},
 		{"::ffff:100.100.100.200"}, {"64:ff9b::a00:1"},
 		{"64:ff9b:1::a00:1"}, {"2002:a00:1::1"},
+		{"fec0::1"}, {"::127.0.0.1"}, {"::ffff:0:127.0.0.1"},
+		{"2001:2::1"}, {"4000::1"}, {"93.184.216.34", "fec0::1"},
 	} {
 		t.Run(strings.Join(ips, ","), func(t *testing.T) {
 			dialled := false
@@ -138,7 +184,7 @@ func TestPublicIP(t *testing.T) {
 			t.Errorf("public destination refused: %s", raw)
 		}
 	}
-	for _, raw := range []string{"100.64.0.1", "100.100.100.200", "0.1.2.3", "198.19.255.254", "240.0.0.1", "192.0.2.1", "198.51.100.1", "203.0.113.1", "2001:db8::1", "2001::1", "64:ff9b::7f00:1", "64:ff9b:1::1", "2002:7f00:1::1"} {
+	for _, raw := range []string{"100.64.0.1", "100.100.100.200", "0.1.2.3", "198.19.255.254", "240.0.0.1", "192.0.2.1", "198.51.100.1", "203.0.113.1", "2001:db8::1", "2001::1", "64:ff9b::7f00:1", "64:ff9b:1::1", "2002:7f00:1::1", "fec0::1", "::127.0.0.1", "::ffff:0:127.0.0.1", "2001:2::1", "4000::1"} {
 		if publicIP(net.ParseIP(raw)) {
 			t.Errorf("special-purpose destination allowed: %s", raw)
 		}
