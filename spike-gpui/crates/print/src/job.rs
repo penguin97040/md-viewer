@@ -26,13 +26,19 @@ pub struct PrintJob {
 }
 
 impl PrintJob {
-    /// Starts printing `doc`. The finished PDF is written to a fresh private temporary file.
-    pub fn start(doc: Arc<Document>, opts: PrintOptions) -> Self {
+    /// Starts printing `doc` to `dest`, a path the person chose. Cancelling or failing leaves
+    /// nothing in that folder, and a file already at `dest` is replaced only by a finished PDF.
+    pub fn start(doc: Arc<Document>, opts: PrintOptions, dest: std::path::PathBuf) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
         let fraction = Arc::new(AtomicU32::new(0));
         let result: Arc<Mutex<Option<PrintState>>> = Arc::default();
         let (c2, f2, r2) = (cancel.clone(), fraction.clone(), result.clone());
         let doc_id = doc.id;
+        // Fail now, with a clear message, if the folder cannot be written, not after the long work.
+        if let Err(e) = crate::handoff::probe(&dest) {
+            *result.lock().expect("lock") = Some(PrintState::Failed(crate::handoff::explain(&e, &dest)));
+            return Self { cancel, fraction, result, doc_id };
+        }
         let spawned = std::thread::Builder::new().name("mdv-print".into()).stack_size(64 << 20).spawn(move || {
             let mut ctl = |p: crate::Progress| {
                 f2.store(p.fraction().to_bits(), Ordering::Relaxed);
@@ -43,9 +49,9 @@ impl PrintJob {
                     if c2.load(Ordering::Relaxed) {
                         PrintState::Cancelled
                     } else {
-                        match crate::handoff::write_temp(&bytes) {
-                            Ok(path) => PrintState::Done { path, report, bytes: bytes.len() },
-                            Err(e) => PrintState::Failed(format!("could not write the PDF: {e}")),
+                        match crate::handoff::write_atomic(&bytes, &dest) {
+                            Ok(()) => PrintState::Done { path: dest, report, bytes: bytes.len() },
+                            Err(e) => PrintState::Failed(crate::handoff::explain(&e, &dest)),
                         }
                     }
                 }

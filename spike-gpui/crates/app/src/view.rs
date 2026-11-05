@@ -78,6 +78,8 @@ pub struct AppView {
     find_started: Instant,        // reader
     pub web_bar: bool,
     pub toast: Option<(String, bool)>,
+    /// A saved PDF the toast offers to open.
+    pub toast_open: Option<std::path::PathBuf>,
     pub settings_open: bool,
     pub tools_open: bool,
     pub licence: Option<&'static str>,
@@ -110,6 +112,7 @@ impl AppView {
             find_started: Instant::now(),
             web_bar: false,
             toast: None,
+            toast_open: None,
             print: None,
             settings_open: false,
             tools_open: false,
@@ -308,13 +311,18 @@ impl AppView {
 
     pub fn show_toast(&mut self, msg: &str, cancel: bool, cx: &mut Context<Self>) {
         self.toast = Some((msg.to_string(), cancel));
+        self.toast_open = None;
         let handle = cx.entity();
         if !cancel {
+            let shown = msg.to_string();
             cx.spawn(async move |_, cx| {
                 cx.background_executor().timer(std::time::Duration::from_secs(4)).await;
                 handle.update(cx, |this, cx| {
-                    this.toast = None;
-                    cx.notify();
+                    // Only the toast this timer was started for: a later one has its own.
+                    if this.toast.as_ref().is_some_and(|t| t.0 == shown) {
+                        this.toast = None;
+                        cx.notify();
+                    }
                 });
             })
             .detach();
@@ -842,7 +850,10 @@ impl AppView {
     fn toast_view(&mut self, vw: f32, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let p = *self.mode.palette();
         let (msg, cancel) = self.toast.clone()?;
-        let action = cancel.then(|| self.link("toast-cancel", "Cancel", cx, |t, _, cx| t.cancel_print(cx)));
+        let action = match self.toast_open.clone() {
+            Some(path) => Some(self.link("toast-open", "Open", cx, move |t, _, cx| t.open_saved(path.clone(), cx))),
+            None => cancel.then(|| self.link("toast-cancel", "Cancel", cx, |t, _, cx| t.cancel_print(cx))),
+        };
         Some(
             div().absolute().left_0().right_0().bottom(px(m::TOAST_BOTTOM)).flex().justify_center().child(
                 div()
