@@ -67,7 +67,10 @@ impl AppView {
                 cx.spawn(async move |this, cx| {
                     let got = match rx.await {
                         Ok(Ok(p)) => Ok(p),
-                        Ok(Err(e)) => Err(format!("Could not show the Save As dialog: {e}")),
+                        Ok(Err(e)) => {
+                            eprintln!("[print] Save As dialog unavailable: {e}");
+                            Err("Could not show the Save As dialog: this system has no file chooser available".to_string())
+                        }
                         Err(_) => Err("The Save As dialog closed unexpectedly".to_string()),
                     };
                     let _ = this.update(cx, |t, cx| t.print_chosen(got, doc_id, cx));
