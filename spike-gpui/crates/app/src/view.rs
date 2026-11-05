@@ -140,6 +140,9 @@ pub struct AppView {
     // accessibility: see a11y.rs
     doc_sample: Option<a11y::DocSample>,
     title: String,
+    /// The find input is about to go. Without this, focus stays on a removed element and key events
+    /// no longer pass through the root's handlers.
+    refocus_root: bool,
 }
 
 impl AppView {
@@ -177,6 +180,7 @@ impl AppView {
             tab_focus: HashMap::new(),
             doc_sample: a11y::DocSample::from_env(),
             title: String::new(),
+            refocus_root: false,
         }
     }
 
@@ -419,6 +423,7 @@ impl AppView {
     }
 
     fn find_close(&mut self, cx: &mut Context<Self>) {
+        self.refocus_root = true;
         self.find_open = false;
         self.find_focus = false;
         if let Some(r) = self.reader() {
@@ -578,6 +583,12 @@ impl AppView {
             }
             "f5" => self.show_toast("Reloading is not part of this spike", false, cx),
             "f3" if !self.find_open => self.find_open(window, cx),
+            "f3" => {
+                let dir = if md.shift { -1 } else { 1 };
+                if let Some(r) = self.reader() {
+                    r.update(cx, |r, cx| r.find_step(dir, cx));
+                }
+            }
             _ if self.find_open && self.find_focus => {
                 if !self.find_key(e, cx) {
                     return;
@@ -1660,6 +1671,10 @@ impl Render for AppView {
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
         let root_focus = self.root_focus.clone();
 
+        if std::mem::take(&mut self.refocus_root) {
+            let root = root_focus.clone();
+            window.defer(cx, move |window, cx| window.focus(&root, cx));
+        }
         // The window title is how assistive technology tells windows apart.
         let title = self.tabs.get(self.active).map_or("MD Viewer".to_string(), |t| format!("{} - MD Viewer", t.name));
         if self.title != title {
