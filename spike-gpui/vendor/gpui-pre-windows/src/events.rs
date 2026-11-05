@@ -116,8 +116,15 @@ impl WindowsWindowInner {
             // Treat double click as a second single click, since we track the double clicks ourselves.
             // If you don't interact with any elements, this will fall through to the windows default
             // behavior of toggling whether the window is maximized.
-            WM_NCLBUTTONDBLCLK | WM_NCLBUTTONDOWN => {
+            WM_NCLBUTTONDBLCLK => {
                 self.handle_nc_mouse_down_msg(handle, MouseButton::Left, wparam, lparam)
+            }
+            WM_NCLBUTTONDOWN => {
+                let handled = self.handle_nc_mouse_down_msg(handle, MouseButton::Left, wparam, lparam);
+                if handled.is_none() {
+                    crate::spike_trace::nudge_caption_press(handle, wparam); // spike switch
+                }
+                handled
             }
             WM_NCRBUTTONDOWN => {
                 self.handle_nc_mouse_down_msg(handle, MouseButton::Right, wparam, lparam)

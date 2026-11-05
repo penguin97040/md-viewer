@@ -38,6 +38,9 @@ static TRACE: LazyLock<Option<Sender<Event>>> = LazyLock::new(|| {
     Some(tx)
 });
 
+/// Whether `MDV_CAPTION_NUDGE` asks for the post in `nudge_caption_press`.
+static CAPTION_NUDGE: LazyLock<bool> = LazyLock::new(|| std::env::var_os("MDV_CAPTION_NUDGE").is_some());
+
 #[inline]
 pub(crate) fn start() -> Option<Instant> {
     TRACE.as_ref().map(|_| Instant::now())
@@ -109,6 +112,23 @@ pub(crate) fn message_ends(window: HWND, msg: u32, started: Option<Instant>) {
     match name_of(msg) {
         Some((_, done)) => span(done, window, 0, started),
         None => span("message", window, msg as i64, started),
+    }
+}
+
+/// SDL has this for a "500ms hang after user clicks on the title bar, but before moving mouse"
+/// (`SDL_windowsevents.c`). Off unless asked for, because nothing here shows yet that this hang is
+/// what the owner sees. Posted before `DefWindowProc` takes the press, so its loop finds it queued.
+pub(crate) fn nudge_caption_press(window: HWND, wparam: WPARAM) {
+    if !*CAPTION_NUDGE || wparam.0 as u32 != HTCAPTION {
+        return;
+    }
+    let mut at = POINT::default();
+    unsafe {
+        if GetCursorPos(&mut at).is_ok() && windows::Win32::Graphics::Gdi::ScreenToClient(window, &mut at).as_bool() {
+            let lparam = (at.x as u16 as isize) | ((at.y as u16 as isize) << 16);
+            let _ = PostMessageW(Some(window), WM_MOUSEMOVE, WPARAM(0), LPARAM(lparam));
+            mark("caption_nudge", window, 0);
+        }
     }
 }
 
