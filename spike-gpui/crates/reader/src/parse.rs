@@ -1559,8 +1559,8 @@ pub fn classify_link(dest: &str) -> Option<LinkTarget> {
     }
     if let Some(scheme) = paths::scheme(dest) {
         return match scheme.as_str() {
-            "http" | "https" => Some(LinkTarget::Web(dest.to_string())),
-            "mailto" => Some(LinkTarget::Mail(dest.to_string())),
+            "http" | "https" => web_address(dest).map(LinkTarget::Web),
+            "mailto" => clean_address(dest).map(LinkTarget::Mail),
             _ => None,
         };
     }
@@ -1569,6 +1569,26 @@ pub fn classify_link(dest: &str) -> Option<LinkTarget> {
         None => (dest, None),
     };
     Some(LinkTarget::Local { path: path.to_string(), fragment: frag })
+}
+
+/// The address as handed to the system's opener, or `None` if the opener could read it differently
+/// from the check here: `scheme` looks through tabs, newlines, leading control characters and
+/// backslashes as a browser does, but on Windows `ShellExecuteW` gets this exact text. Go's
+/// `url.Parse` refuses the same characters. A space is valid in Go's reading, which writes it `%20`.
+fn clean_address(dest: &str) -> Option<String> {
+    if dest.chars().any(|c| c.is_control() || c == '\\') {
+        return None;
+    }
+    Some(dest.replace(' ', "%20"))
+}
+
+/// `http` and `https` also need a host, as in `App.OpenURL`: `http:C:/x` is not a web address.
+fn web_address(dest: &str) -> Option<String> {
+    let clean = clean_address(dest)?;
+    let rest = clean.split_once(':')?.1.strip_prefix("//")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = authority.rsplit('@').next()?;
+    (!host.is_empty() && !host.starts_with(':')).then_some(clean)
 }
 
 /// Where an image comes from. `None` when the sanitiser would remove its address.
@@ -1835,6 +1855,31 @@ mod tests {
         for bad in ["javascript:alert(1)", "file:///etc/passwd", "ftp://x.example", "java\tscript:alert(1)"] {
             assert_eq!(classify_link(bad), None, "{bad}");
         }
+    }
+
+    /// What reaches the system's opener must be what was checked, and must have a host.
+    #[test]
+    fn web_links_are_checked_as_the_opener_reads_them() {
+        for bad in [
+            "http:C:/Windows/System32/calc.exe",
+            r"http:\\attacker\share\x.exe",
+            r"https:\attacker\x",
+            "https:x.example",
+            "http://",
+            "https:///x",
+            "http://?x",
+            "http://user@/x",
+            "http://:80/x",
+            "ht\ttp://x.example",
+            "\u{1}https://x.example",
+            "https://x.example/\nx",
+            "mailto:a@b.example\r\nBcc:c@d.example",
+            r"mailto:a\b",
+        ] {
+            assert_eq!(classify_link(bad), None, "{bad:?}");
+        }
+        assert_eq!(classify_link("https://x.example/a b"), Some(LinkTarget::Web("https://x.example/a%20b".into())));
+        assert_eq!(classify_link("http://user@x.example:8080/a?b#c"), Some(LinkTarget::Web("http://user@x.example:8080/a?b#c".into())));
     }
 
     #[test]
