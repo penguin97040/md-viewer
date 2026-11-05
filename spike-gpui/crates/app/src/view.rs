@@ -309,7 +309,9 @@ impl AppView {
 
     /// Opens a file in a tab, or switches to its existing tab. One tab per file.
     pub fn open_path(&mut self, path: PathBuf, fragment: Option<String>, cx: &mut Context<Self>) {
-        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        // Not `std::fs::canonicalize`: on Windows it returns `\\?\C:\x`, and `paths::resolve` refuses
+        // device paths, so every image and link beside the document would be refused.
+        let path = dunce::canonicalize(&path).unwrap_or(path);
         let shown: SharedString = path.to_string_lossy().to_string().into();
         if let Some(i) = self.tabs.iter().position(|t| t.path == shown) {
             self.select_index(i, cx);

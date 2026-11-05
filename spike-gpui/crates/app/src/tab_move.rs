@@ -705,7 +705,7 @@ fn handle_launch(request: Request, cx: &mut App) {
 }
 
 fn is_elsewhere(path: &std::path::Path, front: &Entity<AppView>, cx: &App) -> bool {
-    let Ok(canonical) = std::fs::canonicalize(path) else { return false };
+    let Ok(canonical) = dunce::canonicalize(path) else { return false };
     let shown = canonical.to_string_lossy();
     cx.global::<Registry>().windows.iter().filter_map(|w| w.view.upgrade()).any(|v| {
         v != *front && v.read(cx).tabs.iter().any(|t| t.path.as_ref() == shown)

@@ -3262,6 +3262,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-channel",
+ "dunce",
  "embed-resource",
  "gpui-pre",
  "gpui-pre-platform",
@@ -3295,6 +3296,7 @@ dependencies = [
 name = "mdv-platform"
 version = "0.0.0"
 dependencies = [
+ "dunce",
  "libc",
  "mdv-theme",
  "raw-window-handle",

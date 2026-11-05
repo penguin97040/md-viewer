@@ -9,6 +9,7 @@ build = "build.rs"
 [dependencies]
 gpui.workspace = true
 anyhow.workspace = true
+dunce.workspace = true
 gpui_platform.workspace = true
 mdv-theme.workspace = true
 mdv-reader.workspace = true

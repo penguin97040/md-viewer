@@ -189,6 +189,7 @@ pub fn path_from_bytes(b: &[u8]) -> io::Result<PathBuf> {
 }
 
 pub fn is_remote_path(p: &Path) -> bool {
-    let s = p.as_os_str().to_string_lossy();
-    s.starts_with(r"\\") || s.starts_with("//")
+    // Either slash counts, as it does for Windows: `/\\server\share` is a network path too.
+    let s = p.as_os_str().to_string_lossy().replace('/', "\\");
+    s.starts_with(r"\\")
 }

@@ -228,7 +228,7 @@ pub fn validate_path(path: &Path) -> Result<PathBuf, &'static str> {
     if os::is_remote_path(path) {
         return Err("network and device paths are not accepted");
     }
-    let canonical = std::fs::canonicalize(path).map_err(|_| "cannot be read")?;
+    let canonical = dunce::canonicalize(path).map_err(|_| "cannot be read")?;
     let meta = std::fs::metadata(&canonical).map_err(|_| "cannot be read")?;
     if !meta.is_file() {
         return Err("not a regular file");
