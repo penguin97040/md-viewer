@@ -46,7 +46,7 @@ fn toplevel_of(conn: &RustConnection, root: Window, mut window: Window) -> Optio
     None
 }
 
-pub fn hit_at(known: &[NativeWindow], at: DesktopPoint) -> Option<Hit> {
+pub fn hit_at(known: &[NativeWindow], ignore: &[NativeWindow], at: DesktopPoint) -> Option<Hit> {
     with_connection(|conn, root| {
         let tops: Vec<Option<Window>> = known
             .iter()
@@ -56,8 +56,18 @@ pub fn hit_at(known: &[NativeWindow], at: DesktopPoint) -> Option<Hit> {
             })
             .collect();
 
+        let ignored: Vec<Window> = ignore
+            .iter()
+            .filter_map(|w| match w {
+                NativeWindow::X11(id) => toplevel_of(conn, root, *id),
+                _ => None,
+            })
+            .collect();
         let children = conn.query_tree(root).ok()?.reply().ok()?.children;
         for &child in children.iter().rev() {
+            if ignored.contains(&child) {
+                continue;
+            }
             // A window can vanish between the calls: skip it, it is not under the pointer.
             let Some(attrs) = conn.get_window_attributes(child).ok().and_then(|c| c.reply().ok()) else {
                 continue;
