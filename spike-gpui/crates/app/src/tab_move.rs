@@ -26,6 +26,7 @@ use mdv_platform::drag::{CancelReason, Machine, Step};
 use mdv_platform::native::{self, Backend, Hit, NativeWindow};
 use mdv_platform::order::insertion_index;
 use mdv_platform::placement::place_detached;
+use mdv_platform::single_instance::{self, Owner, Request};
 use mdv_platform::{DesktopPoint, DesktopRect};
 
 use crate::view::{AppView, TabData};
@@ -92,6 +93,7 @@ pub struct Registry {
     /// The press that ended on this frame was a drag, so the element's click must be ignored.
     swallow_click: bool,
     log: Option<File>,
+    last_active: Option<WindowId>,
     last_layout: String,
     started: Option<Instant>,
     open_queue: Vec<String>,
@@ -123,7 +125,7 @@ pub fn install(cx: &mut App) {
             cancel(CancelReason::SourceClosed, cx);
         }
         log_state("window-closed", "", cx);
-        if cx.windows().is_empty() {
+        if cx.global::<Registry>().windows.is_empty() {
             log_state("quit", "", cx);
             cx.quit();
         }
@@ -198,7 +200,12 @@ pub fn event_sink() -> impl IntoElement {
         |_, _, window, cx| {
             // A window can change scale by moving to another monitor.
             let (id, scale) = (window.window_handle().window_id(), window.scale_factor());
-            if let Some(w) = cx.global_mut::<Registry>().windows.iter_mut().find(|w| w.id == id) {
+            let active = window.is_window_active();
+            let reg = cx.global_mut::<Registry>();
+            if active {
+                reg.last_active = Some(id);
+            }
+            if let Some(w) = reg.windows.iter_mut().find(|w| w.id == id) {
                 w.scale = scale;
             }
             // Evidence log only: report when any strip's geometry settles somewhere new.
@@ -643,6 +650,68 @@ pub fn open_viewer(
     created.ok_or_else(|| anyhow::anyhow!("the window closure did not run"))
 }
 
+// ---- later launches -----------------------------------------------------------------------------
+
+/// Listens for launches handing over files. Nothing here polls: the UI task sleeps on the channel.
+pub fn serve_launches(owner: Owner, cx: &mut App) {
+    let (tx, rx) = async_channel::unbounded::<Request>();
+    owner.serve(move |request| {
+        // If the app has gone, the request drops unanswered and that launch retries.
+        let _ = tx.send_blocking(request);
+    });
+    cx.spawn(async move |cx| {
+        while let Ok(request) = rx.recv().await {
+            cx.update(|cx| handle_launch(request, cx));
+        }
+    })
+    .detach();
+}
+
+/// The most recently focused window, which is where a new file goes.
+fn front_view(cx: &App) -> Option<(Entity<AppView>, AnyWindowHandle)> {
+    let reg = cx.global::<Registry>();
+    let active = cx.active_window().map(|h| h.window_id());
+    let pick = |id: Option<WindowId>| id.and_then(|id| reg.windows.iter().find(|w| w.id == id));
+    let entry = pick(active).or_else(|| pick(reg.last_active)).or_else(|| reg.windows.last())?;
+    Some((entry.view.upgrade()?, entry.handle))
+}
+
+fn handle_launch(request: Request, cx: &mut App) {
+    let Some((view, handle)) = front_view(cx) else {
+        // No window any more: the app is closing. Unanswered, so that launch starts afresh.
+        return;
+    };
+    let mut opened = 0;
+    let mut refused = Vec::new();
+    for path in &request.paths {
+        match single_instance::validate_path(path) {
+            Ok(path) => {
+                view.update(cx, |v, cx| v.open_path(path, None, cx));
+                opened += 1;
+            }
+            Err(why) => refused.push(why),
+        }
+    }
+    if let Some(why) = refused.first() {
+        let message = format!("Could not open a file from another launch: {why}");
+        view.update(cx, |v, cx| v.show_toast(&message, false, cx));
+    }
+    // A launch with an existing file has already raised that file's window, and the last one wins.
+    if !request.paths.iter().any(|p| single_instance::validate_path(p).is_ok() && is_elsewhere(p, &view, cx)) {
+        handle.update(cx, |_, w, _| w.activate_window()).ok();
+    }
+    request.acknowledge();
+    log_state("launch", &format!("\"opened\":{opened},\"refused\":{}", refused.len()), cx);
+}
+
+fn is_elsewhere(path: &std::path::Path, front: &Entity<AppView>, cx: &App) -> bool {
+    let Ok(canonical) = std::fs::canonicalize(path) else { return false };
+    let shown = canonical.to_string_lossy();
+    cx.global::<Registry>().windows.iter().filter_map(|w| w.view.upgrade()).any(|v| {
+        v != *front && v.read(cx).tabs.iter().any(|t| t.path.as_ref() == shown)
+    })
+}
+
 // ---- one tab per file ----------------------------------------------------------------------------
 
 /// Opens `path` in the front window, unless a tab anywhere already has it, in which case that tab
@@ -683,6 +752,35 @@ pub fn open_next_from_queue(this: &mut AppView, cx: &mut gpui::Context<AppView>)
     true
 }
 
+/// Brings forward a tab holding `path` in any window but the one being updated. Reading the calling
+/// view here would panic, which is why it checks its own tabs first.
+pub fn focus_in_other_window(path: &str, fragment: Option<&str>, cx: &mut gpui::Context<AppView>) -> bool {
+    let me = cx.entity();
+    let targets: Vec<_> = cx
+        .global::<Registry>()
+        .windows
+        .iter()
+        .filter_map(|w| w.view.upgrade().map(|v| (v, w.handle)))
+        .filter(|(v, _)| *v != me)
+        .collect();
+    for (view, handle) in targets {
+        let id = view.read(cx).tabs.iter().find(|t| t.path.as_ref() == path).map(|t| t.id);
+        if let Some(id) = id {
+            let fragment = fragment.map(str::to_string);
+            view.update(cx, |v, cx| {
+                v.activate_tab(id, cx);
+                if let (Some(f), Some(r)) = (fragment, v.tabs.iter().find(|t| t.id == id).and_then(|t| t.reader.clone())) {
+                    r.update(cx, |r, cx| r.jump_to_fragment(&f, cx));
+                }
+            });
+            handle.update(cx, |_, w, _| w.activate_window()).ok();
+            log_state_soon("open-existing", format!("\"path\":\"{path}\",\"tab\":{id}"), cx);
+            return true;
+        }
+    }
+    false
+}
+
 fn log_state_soon(event: &'static str, extra: String, cx: &mut App) {
     cx.defer(move |cx| log_state(event, &extra, cx));
 }
@@ -714,10 +812,23 @@ fn log_layout_if_changed(cx: &mut App) {
     }
 }
 
-fn windows_json(cx: &App) -> Vec<String> {
+fn windows_json(cx: &mut App) -> Vec<String> {
     let mut windows = Vec::new();
-    for w in &cx.global::<Registry>().windows {
-        let Some(view) = w.view.upgrade() else { continue };
+    let entries: Vec<_> = cx.global::<Registry>().windows.iter().map(|w| (w.view.clone(), w.native, w.scale)).collect();
+    for (weak, native_window, scale) in entries {
+        let Some(view) = weak.upgrade() else { continue };
+        // The reader's reading position, which lives in its own entity and so moves with the tab.
+        let readers: Vec<_> = view.read(cx).tabs.iter().map(|t| t.reader.clone()).collect();
+        let reader_y: Vec<String> = readers
+            .into_iter()
+            .map(|r| {
+                r.map_or("null,\"reader_top\":\"\"".to_string(), |r| {
+                    let y = r.update(cx, |r, _| r.scroll_y());
+                    let top = r.read(cx).top_line_text(16).replace(['"', '\\'], " ");
+                    format!("{y:.1},\"reader_top\":\"{top}\"")
+                })
+            })
+            .collect();
         let v = view.read(cx);
         let strip = v.tab_scroll.bounds();
         let scroll = f32::from(v.tab_scroll.offset().x);
@@ -725,18 +836,19 @@ fn windows_json(cx: &App) -> Vec<String> {
             .filter_map(|t| v.tab_scroll.bounds_for_item(t))
             .map(|b| format!("[{},{}]", f32::from(b.origin.x) + scroll, f32::from(b.size.width)))
             .collect();
-        let origin = native::client_origin(w.native).map_or("null".to_string(), |o| format!("[{},{}]", o.x, o.y));
+        let origin = native::client_origin(native_window).map_or("null".to_string(), |o| format!("[{},{}]", o.x, o.y));
         let tabs: Vec<String> = v
             .tabs
             .iter()
-            .map(|t| {
+            .enumerate()
+            .map(|(i, t)| {
                 format!(
-                    "{{\"id\":{},\"path\":\"{}\",\"heading\":{},\"toc_offset\":{},\"web_bar\":{},\"opaque\":\"{:?}\"}}",
-                    t.id, t.path, t.state.current_heading, f32::from(t.state.toc_offset), t.state.web_bar, Rc::as_ptr(&t.state.opaque) as *const u8,
+                    "{{\"reader_y\":{},\"id\":{},\"path\":\"{}\",\"heading\":{},\"toc_offset\":{},\"web_bar\":{},\"opaque\":\"{:?}\"}}",
+                    reader_y[i], t.id, t.path, t.state.current_heading, f32::from(t.state.toc_offset), t.state.web_bar, Rc::as_ptr(&t.state.opaque) as *const u8,
                 )
             })
             .collect();
-        let native_id = match w.native {
+        let native_id = match native_window {
             NativeWindow::X11(id) => id as i64,
             NativeWindow::Win32(h) => h as i64,
             NativeWindow::Other(_) => -1,
@@ -744,7 +856,7 @@ fn windows_json(cx: &App) -> Vec<String> {
         windows.push(format!(
             "{{\"win\":{},\"scale\":{},\"origin\":{},\"strip\":[{},{},{},{}],\"rects\":[{}],\"active\":{},\"scroll\":{},\"max_scroll\":{},\"marker\":{},\"find\":{},\"tabs\":[{}]}}",
             native_id,
-            w.scale,
+            scale,
             origin,
             f32::from(strip.origin.x),
             f32::from(strip.origin.y),

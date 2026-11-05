@@ -14,10 +14,33 @@ gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 gpui = { package = "gpui-pre", version = "=0.3.11" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
 anyhow = "=1.0.104"
+pulldown-cmark = { version = "=0.13.6", default-features = false }
+syntect = { version = "=5.3.0", default-features = false, features = ["default-syntaxes", "parsing", "regex-fancy"] }
+rayon = "=1.12.0"
+memchr = "=2.8.3"
+regex = "=1.13.1"
+unicode-linebreak = "=0.1.5"
+unicode-properties = "=0.1.5"
+unicode-segmentation = "=1.13.3"
+unicode-normalization = "=0.1.25"
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 mdv-theme = { path = "crates/theme" }
 mdv-reader = { path = "crates/reader" }
 mdv-content = { path = "crates/content" }
 mdv-platform = { path = "crates/platform" }
 raw-window-handle = "=0.6.2"
+async-channel = "=2.5.0"
+libc = "=0.2.191"
 x11rb = { version = "=0.13.2", default-features = false, features = ["randr"] }
-windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_RemoteDesktop", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
+ratex-types = "=0.1.15"
+ratex-parser = "=0.1.15"
+ratex-layout = "=0.1.15"
+ratex-svg = { version = "=0.1.15", features = ["embed-fonts"] }
+mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
+merman = { version = "=0.10.0-alpha.1", default-features = false, features = ["svg", "all-diagrams", "layout-cytoscape", "native-fonts"] }
+merman-export = { version = "=0.10.0-alpha.1", default-features = false, features = ["native-fonts"] }
+resvg = { version = "=0.47.0", default-features = false, features = ["text"] }
+usvg = { version = "=0.47.0", default-features = false, features = ["text"] }
+roxmltree = "=0.21.2"
+png = "=0.17.16"

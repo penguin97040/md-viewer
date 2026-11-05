@@ -4,6 +4,7 @@ mod a11y;
 mod assets;
 mod tab_move;
 mod ui;
+mod timing;
 mod view;
 
 use std::borrow::Cow;
@@ -11,6 +12,7 @@ use std::rc::Rc;
 
 use gpui::{px, size, App, Bounds};
 use gpui_platform::application;
+use mdv_platform::single_instance::{self, Launch};
 use mdv_theme::Mode;
 use view::{Heading, TabData};
 
@@ -56,12 +58,28 @@ fn huge(n: usize) -> Vec<Heading> {
 }
 
 fn main() {
+    timing::log("main_entered");
     let demo = std::env::var("MDV_DEMO").unwrap_or_default();
     let has = move |k: &str| demo.split(',').any(|d| d == k);
     let (w, h) = std::env::var("MDV_SIZE")
         .ok()
         .and_then(|s| s.split_once('x').map(|(a, b)| (a.parse().unwrap_or(1280.0), b.parse().unwrap_or(800.0))))
         .unwrap_or((1280.0_f32, 800.0_f32));
+
+    // Later launches pass their files to the first process and stop here, before any window.
+    let files: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
+    let owner = if std::env::var_os("MDV_NO_SINGLE_INSTANCE").is_some() {
+        None
+    } else {
+        match single_instance::start(&files) {
+            Ok(Launch::HandedOff) => return,
+            Ok(Launch::Owner(owner)) => Some(owner),
+            Err(e) => {
+                eprintln!("md-viewer: running on its own: {e}");
+                None
+            }
+        }
+    };
 
     application().with_assets(assets::Assets).run(move |cx: &mut App| {
         cx.text_system()
@@ -71,11 +89,14 @@ fn main() {
                 Cow::Borrowed(assets::SHARE_TECH_MONO),
             ])
             .unwrap();
-
+        mdv_reader::ui::init(cx);
         tab_move::install(cx);
 
         let bounds = Bounds::centered(None, size(px(w), px(h)), cx);
-        tab_move::open_viewer(tab_move::viewer_options(bounds), move |v, _cx| {
+        tab_move::open_viewer(tab_move::viewer_options(bounds), move |v, cx| {
+            for f in &files {
+                v.open_path(f.clone(), None, cx);
+            }
             if has("light") {
                 v.mode = Mode::Light;
             }
@@ -98,7 +119,8 @@ fn main() {
             }
             if has("find") {
                 v.find_open = true;
-                v.find_text = "day".into();
+                v.find_field.set("day");
+                v.find_focus = true;
             }
             if has("settings") {
                 v.settings_open = true;
@@ -114,6 +136,10 @@ fn main() {
             }
         }, cx)
         .unwrap();
+        timing::log("window_created");
+        if let Some(owner) = owner {
+            tab_move::serve_launches(owner, cx);
+        }
         cx.activate(true);
     });
 }
