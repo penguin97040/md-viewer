@@ -207,6 +207,11 @@ impl AppView {
     pub fn open_saved(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.toast_open = None;
         self.toast = None;
+        // Windows goes through ShellExecuteW: `explorer.exe` splits its arguments at commas, and the
+        // suggested name comes from the document's, which may contain one. Compile-checked only.
+        #[cfg(target_os = "windows")]
+        cx.open_with_system(&path);
+        #[cfg(not(target_os = "windows"))]
         if let Err(e) = mdv_print::handoff::open_default(&path) {
             self.show_toast(&format!("Could not open the PDF ({e}). It is saved at {}", path.display()), false, cx);
         }

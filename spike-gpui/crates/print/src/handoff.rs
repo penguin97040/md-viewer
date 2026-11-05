@@ -8,6 +8,7 @@ use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(not(target_os = "windows"))]
 use std::process::{Command, Stdio};
 use std::time::SystemTime;
 
@@ -74,14 +75,8 @@ pub fn explain(e: &std::io::Error, dest: &Path) -> String {
 
 /// Opens a file with the system's default handler. The path is passed as one argument, never
 /// through a shell.
+#[cfg(not(target_os = "windows"))]
 pub fn open_default(path: &Path) -> std::io::Result<()> {
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        // Compile-checked only. `explorer.exe <file>` opens the default handler for the type.
-        let mut c = Command::new("explorer.exe");
-        c.arg(path);
-        c
-    };
     #[cfg(target_os = "macos")]
     let mut cmd = {
         // Compile-checked only.
@@ -89,7 +84,7 @@ pub fn open_default(path: &Path) -> std::io::Result<()> {
         c.arg(path);
         c
     };
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(not(target_os = "macos"))]
     let mut cmd = {
         let mut c = Command::new("xdg-open");
         c.arg(path);
