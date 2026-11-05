@@ -1,7 +1,9 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod a11y;
 mod assets;
 mod print;
+mod tab_move;
 mod ui;
 mod timing;
 mod view;
@@ -9,13 +11,11 @@ mod view;
 use std::borrow::Cow;
 use std::rc::Rc;
 
-use gpui::{AppContext as _,
-    point, px, size, App, Bounds, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
-    WindowDecorations, WindowOptions,
-};
+use gpui::{px, size, App, Bounds};
 use gpui_platform::application;
+use mdv_platform::single_instance::{self, Launch};
 use mdv_theme::Mode;
-use view::{AppView, Heading, TabData};
+use view::{Heading, TabData};
 
 fn heading(level: u8, text: &str) -> Heading {
     Heading { level, text: text.to_string().into() }
@@ -67,6 +67,21 @@ fn main() {
         .and_then(|s| s.split_once('x').map(|(a, b)| (a.parse().unwrap_or(1280.0), b.parse().unwrap_or(800.0))))
         .unwrap_or((1280.0_f32, 800.0_f32));
 
+    // Later launches pass their files to the first process and stop here, before any window.
+    let files: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
+    let owner = if std::env::var_os("MDV_NO_SINGLE_INSTANCE").is_some() {
+        None
+    } else {
+        match single_instance::start(&files) {
+            Ok(Launch::HandedOff) => return,
+            Ok(Launch::Owner(owner)) => Some(owner),
+            Err(e) => {
+                eprintln!("md-viewer: running on its own: {e}");
+                None
+            }
+        }
+    };
+
     application().with_assets(assets::Assets).run(move |cx: &mut App| {
         cx.text_system()
             .add_fonts(vec![
@@ -76,71 +91,56 @@ fn main() {
             ])
             .unwrap();
         mdv_reader::ui::init(cx);
-        let files: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
+        tab_move::install(cx);
 
         let bounds = Bounds::centered(None, size(px(w), px(h)), cx);
-        let mut options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_background: WindowBackgroundAppearance::Opaque,
-            // Linux (X11 and Wayland): draw our own frame. Windows and macOS use `titlebar` below.
-            window_decorations: Some(WindowDecorations::Client),
-            window_min_size: Some(size(px(320.0), px(240.0))),
-            app_id: Some("md-viewer".into()),
-            ..Default::default()
-        };
-        // Windows and macOS: no system title bar; the app draws the header. On macOS the native
-        // traffic lights stay, placed inside the 88px left inset. Position is a guess (untested).
-        options.titlebar = Some(TitlebarOptions {
-            title: Some("MD Viewer".into()),
-            appears_transparent: true,
-            traffic_light_position: Some(point(px(14.0), px(17.0))),
-        });
-
-        cx.open_window(options, move |window, cx| {
-            let view = cx.new(|cx| {
-                let mut v = AppView::new(cx);
-                for f in &files {
-                    v.open_path(f.clone(), None, cx);
+        tab_move::open_viewer(tab_move::viewer_options(bounds), move |v, cx| {
+            for f in &files {
+                v.open_path(f.clone(), None, cx);
+            }
+            if has("light") {
+                v.mode = Mode::Light;
+            }
+            if has("tabs") || has("toc100k") {
+                let headings = if has("toc100k") { Rc::new(huge(100_000)) } else { Rc::new(kepler()) };
+                v.tabs = vec![
+                    TabData::new("kepler-track.md".into(), "kepler-track.md".into(), headings),
+                    TabData::new("gear-list.md".into(), "gear-list.md".into(), Rc::new(gear())),
+                ];
+                v.current = if has("toc100k") { 50_000 } else { 2 };
+                if has("toc100k") {
+                    v.toc_scroll.scroll_to_item_strict(50_000, gpui::ScrollStrategy::Center);
                 }
-                if has("light") {
-                    v.mode = Mode::Light;
+            }
+            // Spike: extra stub tabs by file name, for movement and overflow tests.
+            if let Ok(names) = std::env::var("MDV_TABS") {
+                for name in names.split(',') {
+                    v.tabs.push(TabData::new(name.to_string().into(), name.to_string().into(), Rc::new(kepler())));
                 }
-                if has("tabs") || has("toc100k") {
-                    let headings = if has("toc100k") { Rc::new(huge(100_000)) } else { Rc::new(kepler()) };
-                    v.tabs = vec![
-                        TabData { name: "kepler-track.md".into(), path: "kepler-track.md".into(), headings, reader: None },
-                        TabData { name: "gear-list.md".into(), path: "gear-list.md".into(), headings: Rc::new(gear()), reader: None },
-                    ];
-                    v.current = if has("toc100k") { 50_000 } else { 2 };
-                    if has("toc100k") {
-                        v.toc_scroll.scroll_to_item_strict(50_000, gpui::ScrollStrategy::Center);
-                    }
-                }
-                if has("find") {
-                    v.find_open = true;
-                    v.find_field.set("day");
-                    v.find_focus = true;
-                }
-                if has("settings") {
-                    v.settings_open = true;
-                }
-                if has("tools") {
-                    v.tools_open = true;
-                }
-                if has("web") {
-                    v.web_bar = true;
-                }
-                if has("toast") {
-                    v.toast = Some(("Preparing PDF… 40%".into(), true));
-                }
-                v
-            });
-            let focus = view.read(cx).root_focus.clone();
-            window.focus(&focus, cx);
-            view
-        })
+            }
+            if has("find") {
+                v.find_open = true;
+                v.find_field.set("day");
+                v.find_focus = true;
+            }
+            if has("settings") {
+                v.settings_open = true;
+            }
+            if has("tools") {
+                v.tools_open = true;
+            }
+            if has("web") {
+                v.web_bar = true;
+            }
+            if has("toast") {
+                v.toast = Some(("Preparing PDF… 40%".into(), true));
+            }
+        }, cx)
         .unwrap();
         timing::log("window_created");
+        if let Some(owner) = owner {
+            tab_move::serve_launches(owner, cx);
+        }
         cx.activate(true);
     });
 }
