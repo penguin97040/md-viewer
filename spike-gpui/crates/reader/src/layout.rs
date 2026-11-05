@@ -605,7 +605,8 @@ impl Layouter<'_> {
                 self.flush();
                 self.y += pad_y;
                 let h = self.y - top;
-                self.rect(RectItem { rect: Rect::new(ctx.x, top, 4.0, h), fill: Some(self.p.accent), border: None, radius: 0.0 });
+                let bar = if self.print { self.p.muted } else { self.p.accent };
+                self.rect(RectItem { rect: Rect::new(ctx.x, top, 4.0, h), fill: Some(bar), border: None, radius: 0.0 });
                 self.keep(top, self.y);
                 bottom(self, ctx.size);
             }
@@ -1988,7 +1989,7 @@ pub fn token_style(c: TokenClass, mode: Mode) -> (Option<u32>, bool, bool) {
             T::Keyword | T::KeywordConstant | T::KeywordDeclaration | T::KeywordNamespace | T::KeywordPseudo | T::KeywordType => (Some(0xcf222e), false, false),
             T::NameAttribute | T::NameClass | T::Punctuation | T::GenericEmph => (Some(0x1f2328), false, false),
             T::NameBuiltin | T::NameEntity | T::NameFunction => (Some(0x6639ba), false, false),
-            T::NameBuiltinPseudo => (Some(0x6a737d), false, false),
+            T::NameBuiltinPseudo => (Some(0x57606a), false, false),
             T::NameConstant | T::NameDecorator | T::NameTag | T::Number | T::Operator => (Some(0x0550ae), false, false),
             T::NameLabel => (Some(0x990000), true, false),
             T::NameNamespace => (Some(0x24292e), false, false),
@@ -1998,7 +1999,7 @@ pub fn token_style(c: TokenClass, mode: Mode) -> (Option<u32>, bool, bool) {
             T::Comment | T::CommentPreproc => (Some(0x57606a), false, false),
             T::GenericDeleted => (Some(0x82071e), false, false),
             T::GenericInserted => (Some(0x116329), false, false),
-            T::Error => (Some(0xf6f8fa), false, false),
+            T::Error => (Some(0x82071e), false, false),
             T::Name | T::NameException | T::NameProperty | T::Literal | T::GenericHeading | T::GenericSubheading | T::GenericStrong => (None, false, false),
         },
     }

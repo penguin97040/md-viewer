@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/theme", "crates/app", "crates/reader", "crates/content", "crates/platform"]
+members = ["crates/theme", "crates/app", "crates/reader", "crates/content", "crates/platform", "crates/print"]
 
 [workspace.package]
 edition = "2021"
@@ -28,6 +28,7 @@ mdv-theme = { path = "crates/theme" }
 mdv-reader = { path = "crates/reader" }
 mdv-content = { path = "crates/content" }
 mdv-platform = { path = "crates/platform" }
+mdv-print = { path = "crates/print" }
 ratex-types = "=0.1.15"
 ratex-parser = "=0.1.15"
 ratex-layout = "=0.1.15"
@@ -38,4 +39,7 @@ merman-export = { version = "=0.10.0-alpha.1", default-features = false, feature
 resvg = { version = "=0.47.0", default-features = false, features = ["text"] }
 usvg = { version = "=0.47.0", default-features = false, features = ["text"] }
 roxmltree = "=0.21.2"
+krilla = { version = "=0.8.2", default-features = false, features = ["raster-images"] }
+krilla-svg = "=0.8.1"
+rustybuzz = "=0.20.1"
 png = "=0.17.16"

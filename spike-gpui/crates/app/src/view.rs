@@ -92,6 +92,7 @@ pub struct AppView {
     pub perf: bool,
     pub started: Instant,
     first_render_logged: bool,
+    pub print: Option<crate::print::Running>,
 }
 
 impl AppView {
@@ -109,6 +110,7 @@ impl AppView {
             find_started: Instant::now(),
             web_bar: false,
             toast: None,
+            print: None,
             settings_open: false,
             tools_open: false,
             licence: None,
@@ -136,11 +138,11 @@ impl AppView {
 
     // ---- reader: begin --------------------------------------------------------------------
 
-    fn reader(&self) -> Option<gpui::Entity<ReaderView>> {
+    pub(crate) fn reader(&self) -> Option<gpui::Entity<ReaderView>> {
         self.tabs.get(self.active).and_then(|t| t.reader.clone())
     }
 
-    fn reader_settings(&self) -> pane::Settings {
+    pub(crate) fn reader_settings(&self) -> pane::Settings {
         pane::Settings { padding: self.s.padding, font_size: self.s.font_size, line_height: self.s.line_height, serif: self.s.serif, wrap: self.s.wrap, mode: self.mode }
     }
 
@@ -349,7 +351,7 @@ impl AppView {
                 "f" => self.find_open(window, cx),
                 "b" => self.toc_open = !self.toc_open,
                 "o" => self.prompt_open(cx),
-                "p" => self.show_toast("Printing is not part of this spike", false, cx),
+                "p" => self.start_print(cx),
                 // reader: anything else with the shortcut key goes to the find field or the page.
                 _ => {
                     if self.find_open && self.find_focus {
@@ -613,7 +615,7 @@ impl AppView {
         });
         let b_print = self.icon_btn("btn-print", "print", "Save as PDF / Print (Ctrl+P)", if narrow { 40.0 } else { icon_w }, m::ICON_H, m::ICON_SVG, false, cx, |t, _, cx| {
             t.tools_open = false;
-            t.show_toast("Printing is not part of this spike", false, cx)
+            t.start_print(cx)
         });
         let settings_open = self.settings_open;
         let b_settings = self.icon_btn("btn-settings", "settings", "Settings", if narrow { 40.0 } else { icon_w }, m::ICON_H, m::ICON_SVG, settings_open, cx, move |t, _, _| {
@@ -697,7 +699,7 @@ impl AppView {
         let settings_open = self.settings_open;
         let b_print = self.icon_btn("tools-print", "print", "Save as PDF / Print (Ctrl+P)", 40.0, m::ICON_H, m::ICON_SVG, false, cx, |t, _, cx| {
             t.tools_open = false;
-            t.show_toast("Printing is not part of this spike", false, cx)
+            t.start_print(cx)
         });
         let b_set = self.icon_btn("tools-settings", "settings", "Settings", 40.0, m::ICON_H, m::ICON_SVG, settings_open, cx, move |t, _, _| {
             t.tools_open = false;
@@ -840,7 +842,7 @@ impl AppView {
     fn toast_view(&mut self, vw: f32, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let p = *self.mode.palette();
         let (msg, cancel) = self.toast.clone()?;
-        let action = cancel.then(|| self.link("toast-cancel", "Cancel", cx, |t, _, _| t.toast = None));
+        let action = cancel.then(|| self.link("toast-cancel", "Cancel", cx, |t, _, cx| t.cancel_print(cx)));
         Some(
             div().absolute().left_0().right_0().bottom(px(m::TOAST_BOTTOM)).flex().justify_center().child(
                 div()

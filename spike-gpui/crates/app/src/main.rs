@@ -1,6 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod assets;
+mod print;
 mod ui;
 mod timing;
 mod view;

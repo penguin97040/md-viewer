@@ -1,0 +1,20 @@
+[package]
+name = "mdv-print"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+mdv-theme.workspace = true
+mdv-reader = { path = "../reader", default-features = false }
+mdv-content = { path = "../content", features = ["merman"] }
+krilla.workspace = true
+krilla-svg.workspace = true
+rustybuzz.workspace = true
+usvg.workspace = true
+image.workspace = true
+
+[[example]]
+name = "topdf"
+path = "examples/topdf.rs"
