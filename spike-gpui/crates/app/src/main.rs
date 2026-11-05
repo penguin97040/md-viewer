@@ -83,8 +83,9 @@ fn main() {
     };
 
     application().with_assets(assets::Assets).run(move |cx: &mut App| {
-        // Spike switch: compare text smoothing on displays where subpixel rendering fringes.
-        if std::env::var("MDV_TEXT").as_deref() == Ok("grayscale") {
+        // Greyscale text by default: the owner found it far easier to read in dark mode on a
+        // QD-OLED panel. MDV_TEXT=system keeps the platform's own smoothing, for comparison.
+        if std::env::var("MDV_TEXT").as_deref() != Ok("system") {
             cx.set_text_rendering_mode(gpui::TextRenderingMode::Grayscale);
         }
         cx.text_system()
