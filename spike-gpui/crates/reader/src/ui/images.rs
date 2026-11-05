@@ -42,6 +42,7 @@ pub struct ImageStore {
     started: Mutex<Vec<String>>,
     /// This store's share of `DECODED`, given back when the document closes.
     decoded: Arc<AtomicU64>,
+    loads_begun: AtomicU64,
 }
 
 impl Drop for ImageStore {
@@ -52,11 +53,16 @@ impl Drop for ImageStore {
 
 impl ImageStore {
     pub fn new(document: Option<PathBuf>) -> Self {
-        Self { document, entries: Arc::default(), finished: Arc::default(), started: Mutex::new(Vec::new()), decoded: Arc::default() }
+        Self { document, entries: Arc::default(), finished: Arc::default(), started: Mutex::new(Vec::new()), decoded: Arc::default(), loads_begun: AtomicU64::new(0) }
     }
 
     pub fn finished(&self) -> u64 {
         *self.finished.lock().expect("lock")
+    }
+
+    /// Loads started and not yet finished, including any requested by the layout just done.
+    pub fn pending(&self) -> u64 {
+        self.loads_begun.load(Ordering::SeqCst).saturating_sub(self.finished())
     }
 
     pub fn by_key(&self, key: u64) -> Option<Arc<RenderImage>> {
@@ -73,6 +79,7 @@ impl ImageStore {
 
     /// Loads one image on a background thread.
     pub fn load(&self, id: String) {
+        self.loads_begun.fetch_add(1, Ordering::SeqCst);
         let entries = self.entries.clone();
         let finished = self.finished.clone();
         let doc = self.document.clone();

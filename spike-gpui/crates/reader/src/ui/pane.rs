@@ -442,6 +442,37 @@ impl ReaderView {
     }
 
     /// Everything that must be true before painting: options, anchor, and the visible chunks.
+    /// Repaints when maths, diagrams or images finish. Called after layout, which is what asks for
+    /// them: nothing else wakes an idle window, so otherwise they wait for the next mouse move.
+    fn watch_assets(&mut self, cx: &mut Context<Self>) {
+        if self.watching || (self.content.outstanding() == 0 && self.images.pending() == 0) {
+            return;
+        }
+        self.watching = true;
+        cx.spawn(async move |this, cx| {
+            let mut seen = (0u64, 0u64);
+            loop {
+                cx.background_executor().timer(Duration::from_millis(33)).await;
+                let go = this
+                    .update(cx, |v, cx| {
+                        let fin = (v.content.finished(), v.images.finished());
+                        if fin != seen {
+                            seen = fin;
+                            cx.notify();
+                        }
+                        let busy = v.content.outstanding() > 0 || v.images.pending() > 0;
+                        v.watching = busy;
+                        busy
+                    })
+                    .unwrap_or(false);
+                if !go {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn prepare_frame(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         self.bounds = bounds;
         self.visible.clear();
@@ -489,31 +520,6 @@ impl ReaderView {
                 self.waiting.remove(&i);
                 self.invalidate_chunk(i);
             }
-        }
-        if self.content.outstanding() > 0 && !self.watching {
-            self.watching = true;
-            cx.spawn(async move |this, cx| {
-                let mut seen = 0u64;
-                loop {
-                    cx.background_executor().timer(Duration::from_millis(33)).await;
-                    let go = this
-                        .update(cx, |v, cx| {
-                            let fin = v.content.finished();
-                            if fin != seen {
-                                seen = fin;
-                                cx.notify();
-                            }
-                            let busy = v.content.outstanding() > 0;
-                            v.watching = busy;
-                            busy
-                        })
-                        .unwrap_or(false);
-                    if !go {
-                        break;
-                    }
-                }
-            })
-            .detach();
         }
         // An image finished: its chunk needs its real size.
         let finished = self.images.finished();
@@ -1482,7 +1488,10 @@ impl Element for ReaderElement {
 
     fn prepaint(&mut self, _id: Option<&GlobalElementId>, _i: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _r: &mut (), window: &mut Window, cx: &mut App) -> FrameState {
         let started = Instant::now();
-        self.view.update(cx, |v, cx| v.prepare_frame(bounds, window, cx));
+        self.view.update(cx, |v, cx| {
+            v.prepare_frame(bounds, window, cx);
+            v.watch_assets(cx);
+        });
         if window.is_a11y_active() {
             let t0 = Instant::now();
             self.a11y_lines = self.view.read(cx).a11y_lines(bounds);
