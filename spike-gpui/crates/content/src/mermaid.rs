@@ -35,6 +35,12 @@ pub(crate) fn render(src: &str, opts: &DiagramOptions) -> Result<RenderedAsset, 
     }
     let ro = options(&opts, card);
     guard::run(&guard::MERMAID_ABANDONED, limits::MERMAID_BUDGET, move || {
+        #[cfg(feature = "merman")]
+        let svg = {
+            let _ = &ro;
+            crate::merman_backend::render_svg(&clean, &opts, card.then_some(mdv_theme::BRAND_TEXT))?
+        };
+        #[cfg(not(feature = "merman"))]
         let svg = render_with_options(&clean, ro).map_err(|e| ContentError::Parse(e.to_string()))?;
         let svg = escape_bare_ampersands(svg);
         svgcheck::check(&svg)?;
@@ -126,7 +132,7 @@ fn kind(src: &str) -> String {
 /// `#131300`, timeline pastel boxes under theme text, C4 labels). In dark mode these are drawn in
 /// the light scheme on a light card instead of unreadable text on black.
 fn hard_codes_light_colours(k: &str) -> bool {
-    k.starts_with("quadrantchart") || k.starts_with("timeline") || k.starts_with("c4")
+    k.starts_with("quadrantchart") || k.starts_with("timeline") || k.starts_with("c4") || (cfg!(feature = "merman") && k.starts_with("packet"))
 }
 
 fn options(opts: &DiagramOptions, card: bool) -> RenderOptions {

@@ -11,9 +11,14 @@ ratex-parser.workspace = true
 ratex-layout.workspace = true
 ratex-svg.workspace = true
 mermaid-rs-renderer.workspace = true
+merman = { workspace = true, optional = true }
+merman-export = { workspace = true, optional = true }
 resvg.workspace = true
 usvg.workspace = true
 roxmltree.workspace = true
+
+[features]
+merman = ["dep:merman", "dep:merman-export"]
 
 [dev-dependencies]
 png.workspace = true
@@ -49,3 +54,8 @@ path = "examples/size_mermaid.rs"
 [[example]]
 name = "size_all"
 path = "examples/size_all.rs"
+
+[[example]]
+name = "scale_merman"
+path = "examples/scale_merman.rs"
+required-features = ["merman"]
