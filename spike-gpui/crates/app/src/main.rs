@@ -74,6 +74,8 @@ fn main() {
                 Cow::Borrowed(assets::SHARE_TECH_MONO),
             ])
             .unwrap();
+        mdv_reader::ui::init(cx);
+        let files: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
 
         let bounds = Bounds::centered(None, size(px(w), px(h)), cx);
         let mut options = WindowOptions {
@@ -96,14 +98,17 @@ fn main() {
         cx.open_window(options, move |window, cx| {
             let view = cx.new(|cx| {
                 let mut v = AppView::new(cx);
+                for f in &files {
+                    v.open_path(f.clone(), None, cx);
+                }
                 if has("light") {
                     v.mode = Mode::Light;
                 }
                 if has("tabs") || has("toc100k") {
                     let headings = if has("toc100k") { Rc::new(huge(100_000)) } else { Rc::new(kepler()) };
                     v.tabs = vec![
-                        TabData { name: "kepler-track.md".into(), path: "kepler-track.md".into(), headings },
-                        TabData { name: "gear-list.md".into(), path: "gear-list.md".into(), headings: Rc::new(gear()) },
+                        TabData { name: "kepler-track.md".into(), path: "kepler-track.md".into(), headings, reader: None },
+                        TabData { name: "gear-list.md".into(), path: "gear-list.md".into(), headings: Rc::new(gear()), reader: None },
                     ];
                     v.current = if has("toc100k") { 50_000 } else { 2 };
                     if has("toc100k") {
@@ -112,7 +117,8 @@ fn main() {
                 }
                 if has("find") {
                     v.find_open = true;
-                    v.find_text = "day".into();
+                    v.find_field.set("day");
+                    v.find_focus = true;
                 }
                 if has("settings") {
                     v.settings_open = true;

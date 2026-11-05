@@ -4,5 +4,21 @@ version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
+[features]
+default = ["ui"]
+# The on-screen view. Without it the crate is the document model and parser alone, with no GPUI.
+ui = ["dep:gpui"]
+
 [dependencies]
 mdv-theme.workspace = true
+gpui = { workspace = true, optional = true }
+pulldown-cmark.workspace = true
+syntect.workspace = true
+rayon.workspace = true
+memchr.workspace = true
+regex.workspace = true
+unicode-linebreak.workspace = true
+unicode-properties.workspace = true
+unicode-segmentation.workspace = true
+unicode-normalization.workspace = true
+image.workspace = true

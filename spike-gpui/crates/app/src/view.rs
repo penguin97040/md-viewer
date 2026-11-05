@@ -12,6 +12,9 @@ use gpui::{
 };
 use mdv_theme::{metrics as m, Mode};
 
+// reader: the real reader pane, its find field and file opening.
+use mdv_reader::ui::{field, pane::{self, ReaderEvent, ReaderView}};
+use std::path::PathBuf;
 use crate::assets;
 use crate::ui::{c, icon, spaced, tabular, tooltip, transparent, up};
 
@@ -30,6 +33,8 @@ pub struct TabData {
     pub name: SharedString,
     pub path: SharedString,
     pub headings: std::rc::Rc<Vec<Heading>>,
+    /// reader: `None` only for the chrome's stub demo tabs.
+    pub reader: Option<gpui::Entity<ReaderView>>,
 }
 
 #[derive(Clone, Copy)]
@@ -67,8 +72,10 @@ pub struct AppView {
     pub active: usize,
     pub toc_open: bool,
     pub find_open: bool,
-    pub find_text: String,
-    pub find_pos: usize,
+    pub find_field: field::Field, // reader
+    pub find_focus: bool,         // reader
+    find_blink: u64,              // reader
+    find_started: Instant,        // reader
     pub web_bar: bool,
     pub toast: Option<(String, bool)>,
     pub settings_open: bool,
@@ -96,8 +103,10 @@ impl AppView {
             active: 0,
             toc_open: true,
             find_open: false,
-            find_text: String::new(),
-            find_pos: 0,
+            find_field: field::Field::default(),
+            find_focus: false,
+            find_blink: 0,
+            find_started: Instant::now(),
             web_bar: false,
             toast: None,
             settings_open: false,
@@ -125,14 +134,175 @@ impl AppView {
         self.tabs.get(self.active).map(|t| t.headings.clone()).unwrap_or_default()
     }
 
-    /// Hard-coded match count for the demo find bar: occurrences in the heading text.
-    fn find_total(&self) -> usize {
-        if self.find_text.is_empty() {
-            return 0;
-        }
-        let q = self.find_text.to_lowercase();
-        self.headings().iter().take(2000).map(|h| h.text.to_lowercase().matches(&q).count()).sum()
+    // ---- reader: begin --------------------------------------------------------------------
+
+    fn reader(&self) -> Option<gpui::Entity<ReaderView>> {
+        self.tabs.get(self.active).and_then(|t| t.reader.clone())
     }
+
+    fn reader_settings(&self) -> pane::Settings {
+        pane::Settings { padding: self.s.padding, font_size: self.s.font_size, line_height: self.s.line_height, serif: self.s.serif, wrap: self.s.wrap, mode: self.mode }
+    }
+
+    /// Opens a file in a tab, or switches to its existing tab. One tab per file.
+    pub fn open_path(&mut self, path: PathBuf, fragment: Option<String>, cx: &mut Context<Self>) {
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        let shown: SharedString = path.to_string_lossy().to_string().into();
+        if let Some(i) = self.tabs.iter().position(|t| t.path == shown) {
+            self.active = i;
+            self.current = 0;
+            if let (Some(f), Some(r)) = (fragment, self.tabs[i].reader.clone()) {
+                r.update(cx, |r, cx| r.jump_to_fragment(&f, cx));
+            }
+            cx.notify();
+            return;
+        }
+        let name: SharedString = path.file_name().map_or("Untitled".to_string(), |n| n.to_string_lossy().to_string()).into();
+        let settings = self.reader_settings();
+        let reader = cx.new(|cx| ReaderView::new(settings, cx));
+        cx.subscribe(&reader, |this, _, e: &ReaderEvent, cx| match e {
+            ReaderEvent::OpenLocal { path, fragment } => this.open_path(path.clone(), fragment.clone(), cx),
+            ReaderEvent::Toast(m) => this.show_toast(m, false, cx),
+        })
+        .detach();
+        let first = self.tabs.iter().all(|t| t.reader.is_none());
+        self.tabs.push(TabData { name, path: shown.clone(), headings: Default::default(), reader: Some(reader.clone()) });
+        self.active = self.tabs.len() - 1;
+        self.current = 0;
+        if first {
+            mdv_reader::ui::script::start(reader.clone(), cx);
+        }
+        let app = cx.entity().downgrade();
+        reader.update(cx, |r, cx| {
+            r.open(path, cx, move |r, result, cx| {
+                let outline: Result<Vec<Heading>, String> = result.map(|()| {
+                    r.doc.as_ref().map_or(Vec::new(), |d| d.headings.iter().map(|h| Heading { level: h.level, text: h.text.clone().into() }).collect())
+                });
+                if let (Ok(_), Some(f)) = (&outline, &fragment) {
+                    r.jump_to_fragment(f, cx);
+                }
+                let _ = app.update(cx, |this, cx| {
+                    match outline {
+                        Ok(h) => {
+                            if let Some(t) = this.tabs.iter_mut().find(|t| t.path == shown) {
+                                t.headings = std::rc::Rc::new(h);
+                            }
+                        }
+                        Err(e) => {
+                            this.tabs.retain(|t| t.path != shown);
+                            this.active = this.active.min(this.tabs.len().saturating_sub(1));
+                            this.show_toast(&e, false, cx);
+                        }
+                    }
+                    cx.notify();
+                });
+            });
+        });
+        cx.notify();
+    }
+
+    /// The native open dialog.
+    fn prompt_open(&mut self, cx: &mut Context<Self>) {
+        let answer = cx.prompt_for_paths(gpui::PathPromptOptions { files: true, directories: false, multiple: true, prompt: None });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = answer.await {
+                let _ = this.update(cx, |this, cx| {
+                    for p in paths {
+                        this.open_path(p, None, cx);
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn find_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let _ = window;
+        self.find_open = true;
+        self.find_focus = true;
+        self.find_started = Instant::now();
+        self.close_popups();
+        if let Some(r) = self.reader() {
+            // A short one-line selection seeds the query, then it is all selected for replacing.
+            let seed = r.read(cx).selected_text().map(|t| t.trim().to_string()).filter(|t| !t.is_empty() && !t.contains('\n') && t.len() < 200);
+            if let Some(t) = seed {
+                self.find_field.set(&t);
+            } else {
+                self.find_field.select_all();
+            }
+            let q = self.find_field.text.clone();
+            r.update(cx, |r, cx| {
+                if mdv_reader::fold::fold(&q) != r.find.q {
+                    r.find_query(&q, false, cx);
+                }
+            });
+        }
+        self.start_blink(cx);
+    }
+
+    /// The caret needs repainting at its blink rate while the find field has focus.
+    fn start_blink(&mut self, cx: &mut Context<Self>) {
+        self.find_blink += 1;
+        let gen = self.find_blink;
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(std::time::Duration::from_millis(530)).await;
+            let go = this.update(cx, |this, cx| {
+                let on = this.find_blink == gen && this.find_open && this.find_focus;
+                if on {
+                    cx.notify();
+                }
+                on
+            });
+            if !matches!(go, Ok(true)) {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    fn find_close(&mut self, cx: &mut Context<Self>) {
+        self.find_open = false;
+        self.find_focus = false;
+        if let Some(r) = self.reader() {
+            r.update(cx, |r, cx| r.find_close(cx));
+        }
+    }
+
+    fn find_step(&mut self, dir: i64, cx: &mut Context<Self>) {
+        if let Some(r) = self.reader() {
+            r.update(cx, |r, cx| r.find_step(dir, cx));
+        }
+    }
+
+    fn find_key(&mut self, e: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        let k = e.keystroke.key.as_str();
+        let md = &e.keystroke.modifiers;
+        if k == "enter" {
+            let q = self.find_field.text.clone();
+            let shift = md.shift;
+            if let Some(r) = self.reader() {
+                r.update(cx, |r, cx| {
+                    if mdv_reader::fold::fold(&q) != r.find.q {
+                        r.find_query(&q, false, cx);
+                    } else {
+                        r.find_step(if shift { -1 } else { 1 }, cx);
+                    }
+                });
+            }
+            return true;
+        }
+        let edit = field::apply_key(&mut self.find_field, e, self.mac, cx);
+        self.find_started = Instant::now();
+        if edit.changed {
+            let q = self.find_field.text.clone();
+            if let Some(r) = self.reader() {
+                r.update(cx, |r, cx| r.find_query(&q, true, cx));
+            }
+        }
+        edit.handled
+    }
+
+    // ---- reader: end ----------------------------------------------------------------------
 
     pub fn show_toast(&mut self, msg: &str, cancel: bool, cx: &mut Context<Self>) {
         self.toast = Some((msg.to_string(), cancel));
@@ -176,14 +346,24 @@ impl AppView {
         let modkey = if self.mac { md.platform } else { md.control };
         if modkey {
             match k {
-                "f" => {
-                    self.find_open = true;
-                    self.close_popups();
-                }
+                "f" => self.find_open(window, cx),
                 "b" => self.toc_open = !self.toc_open,
-                "o" => self.show_toast("Opening files is not part of this spike", false, cx),
+                "o" => self.prompt_open(cx),
                 "p" => self.show_toast("Printing is not part of this spike", false, cx),
-                _ => return,
+                // reader: anything else with the shortcut key goes to the find field or the page.
+                _ => {
+                    if self.find_open && self.find_focus {
+                        if !self.find_key(e, cx) {
+                            return;
+                        }
+                    } else {
+                        let mac = self.mac;
+                        let used = self.reader().is_some_and(|r| r.update(cx, |r, cx| r.key_down(e, mac, cx)));
+                        if !used {
+                            return;
+                        }
+                    }
+                }
             }
             cx.notify();
             return;
@@ -204,30 +384,23 @@ impl AppView {
                 } else if self.settings_open {
                     self.settings_open = false;
                 } else if self.find_open {
-                    self.find_open = false;
+                    self.find_close(cx);
                 }
             }
             "f5" => self.show_toast("Reloading is not part of this spike", false, cx),
-            _ if self.find_open => match k {
-                "enter" => {
-                    let total = self.find_total();
-                    if total > 0 {
-                        self.find_pos = if md.shift { (self.find_pos + total - 1) % total } else { (self.find_pos + 1) % total };
-                    }
+            _ if self.find_open && self.find_focus => {
+                if !self.find_key(e, cx) {
+                    return;
                 }
-                "backspace" => {
-                    self.find_text.pop();
-                    self.find_pos = 0;
+            }
+            // reader: keys for the document.
+            _ => {
+                let mac = self.mac;
+                let used = self.reader().is_some_and(|r| r.update(cx, |r, cx| r.key_down(e, mac, cx)));
+                if !used {
+                    return;
                 }
-                _ => match &e.keystroke.key_char {
-                    Some(ch) if !md.control && !md.platform => {
-                        self.find_text.push_str(ch);
-                        self.find_pos = 0;
-                    }
-                    _ => return,
-                },
-            },
-            _ => return,
+            }
         }
         cx.notify();
     }
@@ -428,10 +601,14 @@ impl AppView {
 
         let find_open = self.find_open;
         let b_toc = self.icon_btn("btn-toc", "toc", "Contents (Ctrl+B)", icon_w, m::ICON_H, m::ICON_SVG, self.toc_open, cx, |t, _, _| t.toc_open = !t.toc_open);
-        let b_open = self.icon_btn("btn-open", "open", "Open (Ctrl+O)", icon_w, m::ICON_H, m::ICON_SVG, false, cx, |t, _, cx| t.show_toast("Opening files is not part of this spike", false, cx));
+        let b_open = self.icon_btn("btn-open", "open", "Open (Ctrl+O)", icon_w, m::ICON_H, m::ICON_SVG, false, cx, |t, _, cx| t.prompt_open(cx));
         let b_reload = self.icon_btn("btn-reload", "reload", "Reload (F5)", icon_w, m::ICON_H, m::ICON_SVG, false, cx, |t, _, cx| t.show_toast("Reloading is not part of this spike", false, cx));
-        let b_find = self.icon_btn("btn-find", "find", "Find (Ctrl+F)", icon_w, m::ICON_H, m::ICON_SVG, false, cx, move |t, _, _| {
-            t.find_open = !find_open;
+        let b_find = self.icon_btn("btn-find", "find", "Find (Ctrl+F)", icon_w, m::ICON_H, m::ICON_SVG, false, cx, move |t, w, cx| {
+            if find_open {
+                t.find_close(cx);
+            } else {
+                t.find_open(w, cx);
+            }
             t.close_popups();
         });
         let b_print = self.icon_btn("btn-print", "print", "Save as PDF / Print (Ctrl+P)", if narrow { 40.0 } else { icon_w }, m::ICON_H, m::ICON_SVG, false, cx, |t, _, cx| {
@@ -542,28 +719,23 @@ impl AppView {
 
     fn find_bar(&mut self, vw: f32, cx: &mut Context<Self>) -> impl IntoElement {
         let p = *self.mode.palette();
-        let total = self.find_total();
-        let count = if self.find_text.is_empty() {
-            String::new()
-        } else if total == 0 {
-            "No results".to_string()
-        } else {
-            format!("{} of {}", self.find_pos + 1, total)
+        let count = self.reader().map_or(String::new(), |r| r.read(cx).find_count_text());
+        let prev = self.icon_btn("find-prev", "prev", "Previous (Shift+Enter)", m::ICON_SMALL, m::ICON_SMALL, m::ICON_SMALL_SVG, false, cx, |t, _, cx| t.find_step(-1, cx));
+        let next = self.icon_btn("find-next", "next", "Next (Enter)", m::ICON_SMALL, m::ICON_SMALL, m::ICON_SMALL_SVG, false, cx, |t, _, cx| t.find_step(1, cx));
+        let close = self.icon_btn("find-close", "close", "Close (Esc)", m::ICON_SMALL, m::ICON_SMALL, m::ICON_SMALL_SVG, false, cx, |t, _, cx| t.find_close(cx));
+        let look = field::FieldLook {
+            font: gpui::font(SANS),
+            size: 14.0,
+            text: c(p.text),
+            placeholder: c(0x757575),
+            selection: c(p.accent),
+            selected_text: c(p.bg),
+            caret: c(p.text),
+            started: self.find_started,
+            focused: self.find_focus,
         };
-        let prev = self.icon_btn("find-prev", "prev", "Previous (Shift+Enter)", m::ICON_SMALL, m::ICON_SMALL, m::ICON_SMALL_SVG, false, cx, |t, _, _| {
-            let n = t.find_total();
-            if n > 0 {
-                t.find_pos = (t.find_pos + n - 1) % n;
-            }
-        });
-        let next = self.icon_btn("find-next", "next", "Next (Enter)", m::ICON_SMALL, m::ICON_SMALL, m::ICON_SMALL_SVG, false, cx, |t, _, _| {
-            let n = t.find_total();
-            if n > 0 {
-                t.find_pos = (t.find_pos + 1) % n;
-            }
-        });
-        let close = self.icon_btn("find-close", "close", "Close (Esc)", m::ICON_SMALL, m::ICON_SMALL, m::ICON_SMALL_SVG, false, cx, |t, _, _| t.find_open = false);
-        let empty = self.find_text.is_empty();
+        let font_for_hit = look.font.clone();
+        let shown = self.find_field.clone();
         div()
             .absolute()
             .top(px(m::FIND_TOP))
@@ -586,13 +758,33 @@ impl AppView {
                     .w(px(m::FIND_INPUT_W))
                     .min_w_0()
                     .overflow_hidden()
-                    .child(if empty {
-                        div().text_color(c(0x757575)).child("Find")
-                    } else {
-                        div().text_color(c(p.text)).child(self.find_text.clone())
-                    })
-                    // the caret: a 1px bar, as the focused <input> shows one
-                    .child(div().w(px(1.0)).h(px(16.0)).bg(c(p.text)).when(!empty, |d| d.ml(px(1.0)))),
+                    .id("find-input")
+                    .h(px(20.0))
+                    .cursor(CursorStyle::IBeam)
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.find_focus = true;
+                        this.find_started = Instant::now();
+                        this.start_blink(cx);
+                        let look = field::FieldLook { font: font_for_hit.clone(), size: 14.0, text: c(0), placeholder: c(0), selection: c(0), selected_text: c(0), caret: c(0), started: Instant::now(), focused: true };
+                        // The field's left edge: right-aligned bar, 10 px padding, known widths.
+                        let vw = f32::from(window.viewport_size().width);
+                        let bar_w = 10.0 + m::FIND_INPUT_W + 2.0 + 70.0 + 2.0 + m::ICON_SMALL * 3.0 + 2.0 * 2.0 + 6.0 + 2.0;
+                        let left = vw - m::FIND_RIGHT - bar_w + 1.0 + 10.0;
+                        let at = field::offset_at(&this.find_field.text, f32::from(e.position.x) - left, 0.0, &look, window);
+                        if e.click_count >= 3 {
+                            this.find_field.select_all();
+                        } else if e.click_count == 2 {
+                            this.find_field.select_word(at);
+                        } else {
+                            this.find_field.caret = at;
+                            if !e.modifiers.shift {
+                                this.find_field.anchor = at;
+                            }
+                        }
+                        cx.notify();
+                    }))
+                    .child(field::field_canvas(&shown, look, m::FIND_INPUT_W)),
             )
             .child(
                 div()
@@ -704,7 +896,7 @@ impl AppView {
                     .cursor_pointer()
                     .hover(move |s| s.bg(c(p.text)).border_color(c(p.text)))
                     .focus_visible(move |s| s.border_2().border_color(c(p.text)))
-                    .on_click(cx.listener(|t, _, _, cx| t.show_toast("Opening files is not part of this spike", false, cx)))
+                    .on_click(cx.listener(|t, _, _, cx| t.prompt_open(cx)))
                     .child(up("Open file…")),
             )
             .child(div().my(px(16.0)).font_family(MONO).text_size(px(16.0)).line_height(relative(1.4)).child(if self.mac { "⌘O" } else { "Ctrl+O" }))
@@ -760,6 +952,10 @@ impl AppView {
                                 .hover(move |s| s.bg(c(p.bg_hover)).text_color(c(p.text)))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.current = i;
+                                    // reader: the outline jumps the document.
+                                    if let Some(r) = this.reader() {
+                                        r.update(cx, |r, cx| r.jump_to_heading(i, cx));
+                                    }
                                     cx.notify();
                                 }))
                                 .child(if h.text.is_empty() { SharedString::from("(untitled)") } else { h.text.clone() })
@@ -1128,8 +1324,24 @@ impl Render for AppView {
         let root_focus = self.root_focus.clone();
 
         let header = self.header(narrow, cx);
+        // reader: settings drive the active reader live, and its position drives the outline.
+        if let Some(r) = self.reader() {
+            let settings = self.reader_settings();
+            let cur = r.update(cx, |r, _| {
+                r.settings = settings;
+                r.current_heading()
+            });
+            if let Some(cur) = cur {
+                if cur != self.current {
+                    self.current = cur;
+                    self.toc_scroll.scroll_to_item(cur, gpui::ScrollStrategy::Nearest);
+                }
+            }
+        }
         let toc = (has_doc && self.toc_open).then(|| self.toc_panel(vh, if narrow { (vw * 0.36).min(180.0) } else { m::TOC_WIDTH }, cx));
-        let body = if has_doc {
+        let body = if let Some(r) = self.reader() {
+            r.into_any_element()
+        } else if has_doc {
             let tab_name = self.tabs[self.active].name.clone();
             let s = self.s;
             div()
@@ -1191,6 +1403,7 @@ impl Render for AppView {
                         this.press_header(e, window);
                     }
                 }
+                this.find_focus = false; // reader: a click outside the find field leaves it
                 if this.settings_open || this.tools_open {
                     this.close_popups();
                     cx.notify();
