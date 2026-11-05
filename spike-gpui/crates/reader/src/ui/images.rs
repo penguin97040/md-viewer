@@ -85,7 +85,9 @@ impl ImageStore {
         let doc = self.document.clone();
         let decoded = self.decoded.clone();
         std::thread::spawn(move || {
-            let entry = read_image(&id, doc.as_deref(), &decoded).unwrap_or(Entry::Failed);
+            // A decoder panic must still count as finished, or the repaint watcher never stops.
+            let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read_image(&id, doc.as_deref(), &decoded)));
+            let entry = read.ok().flatten().unwrap_or(Entry::Failed);
             entries.lock().expect("lock").insert(id, entry);
             *finished.lock().expect("lock") += 1;
         });

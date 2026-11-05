@@ -254,7 +254,11 @@ impl ReaderView {
     /// Reads and parses a file off the main thread. A later open replaces an earlier one.
     pub fn open(&mut self, path: PathBuf, cx: &mut Context<Self>, done: impl FnOnce(&mut Self, Result<(), String>, &mut Context<Self>) + 'static) {
         self.perf.opened_at = Some(Instant::now());
-        let task = cx.background_spawn(async move { Document::load(&path) });
+        // On Windows these tasks run in an `extern "system"` thread pool callback, where a panic
+        // aborts the process and so closes every window. See also the prefetch and search tasks.
+        let task = cx.background_spawn(async move {
+            std::panic::catch_unwind(|| Document::load(&path)).unwrap_or_else(|_| Err("the viewer could not read this file".to_string()))
+        });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| match result {
@@ -722,6 +726,8 @@ impl ReaderView {
         let enabled = self.perf.enabled;
         let task = cx.background_spawn(async move {
             let t = Instant::now();
+            let height = opts.font_size * opts.line_height;
+            let laid = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let c = doc2.chunk(k);
             // Each worker has its own window text system: GPUI's frame-based layout cache is not
             // shared across threads, and the platform text system underneath is thread-safe.
@@ -729,7 +735,10 @@ impl ReaderView {
             let mut shaper = GpuiShaper::new(wts);
             let assets = ViewAssets { images: &images, extra: extra.as_deref(), content: ContentAssets::new(&content, opts.mode, content_scale) };
             let l = layout::layout_chunk(&c, &opts, &st, k == 0, k + 1 == doc2.chunks.len(), &mut shaper, &assets);
-            (Arc::new(l), t.elapsed(), assets.waiting())
+            (l, assets.waiting())
+            }));
+            let (l, waits) = laid.unwrap_or_else(|_| (layout::ChunkLayout { height, layers: vec![Default::default()], ..Default::default() }, Vec::new()));
+            (Arc::new(l), t.elapsed(), waits)
         });
         let doc_id = doc.id;
         cx.spawn(async move |this, cx| {
@@ -1219,7 +1228,12 @@ impl ReaderView {
             let q2 = folded.clone();
             let doc2 = doc.clone();
             let t = Instant::now();
-            let counts = cx.background_spawn(async move { doc2.search(&q2) }).await;
+            let chunks = doc2.chunks.len();
+            let counts = cx
+                .background_spawn(async move {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| doc2.search(&q2))).unwrap_or_else(|_| vec![0; chunks])
+                })
+                .await;
             let took = t.elapsed();
             let _ = this.update(cx, |this, cx| {
                 // Only for exactly this query on exactly this parse.
