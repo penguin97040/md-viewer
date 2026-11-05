@@ -76,12 +76,15 @@ pub enum Hit {
 
 /// What is on top at `at`. `None` means this platform cannot say, or asking failed; callers must
 /// treat that as "cancel", never as "outside".
-pub fn hit_at(known: &[NativeWindow], at: DesktopPoint) -> Option<Hit> {
+///
+/// `ignore` lists our own helper windows (the drag label). They are looked through: what is beneath
+/// them is what the pointer is over (MISTAKES 32).
+pub fn hit_at(known: &[NativeWindow], ignore: &[NativeWindow], at: DesktopPoint) -> Option<Hit> {
     match known.first()?.backend() {
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        Backend::X11 => x11::hit_at(known, at),
+        Backend::X11 => x11::hit_at(known, ignore, at),
         #[cfg(target_os = "windows")]
-        Backend::Windows => windows::hit_at(known, at),
+        Backend::Windows => windows::hit_at(known, ignore, at),
         _ => None,
     }
 }
@@ -131,6 +134,55 @@ pub fn place_window(window: NativeWindow, rect: DesktopRect) {
     match window {
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         NativeWindow::X11(id) => x11::place_window(id, rect),
+        _ => {
+            let _ = rect;
+        }
+    }
+}
+
+/// Makes a just-created helper window (the drag label) unable to take activation, where window
+/// creation alone does not guarantee it. X11 pop-ups are override-redirect, so need nothing.
+pub fn prepare_ghost(window: NativeWindow) {
+    match window {
+        #[cfg(target_os = "windows")]
+        NativeWindow::Win32(h) => windows::prepare_ghost(h),
+        _ => {}
+    }
+}
+
+/// Sizes, places and shows the hidden drag label without activating it, in physical pixels. It calls
+/// back into the window procedure at once, so on Windows it must run with App not borrowed.
+pub fn show_ghost(window: NativeWindow, rect: DesktopRect) {
+    match window {
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        NativeWindow::X11(id) => x11::show_window(id, rect),
+        #[cfg(target_os = "windows")]
+        NativeWindow::Win32(h) => windows::show_ghost(h, rect),
+        _ => {
+            let _ = rect;
+        }
+    }
+}
+
+/// Hides the drag label until the next drag.
+pub fn hide_ghost(window: NativeWindow) {
+    match window {
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        NativeWindow::X11(id) => x11::hide_window(id),
+        #[cfg(target_os = "windows")]
+        NativeWindow::Win32(h) => windows::hide_ghost(h),
+        _ => {}
+    }
+}
+
+/// Moves the drag label without activating it or changing its size or stacking, in physical
+/// pixels. On Windows it also keeps the window topmost.
+pub fn place_ghost(window: NativeWindow, rect: DesktopRect) {
+    match window {
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        NativeWindow::X11(id) => x11::place_window(id, rect),
+        #[cfg(target_os = "windows")]
+        NativeWindow::Win32(h) => windows::place_ghost(h, rect),
         _ => {
             let _ = rect;
         }

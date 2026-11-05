@@ -85,6 +85,8 @@ impl WindowsWindowInner {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
+        // Spike instrumentation, see `spike_trace`.
+        let trace = crate::spike_trace::message_begins(handle, msg, wparam, lparam);
         let handled = match msg {
             // `DefWindowProc` answers `MA_NOACTIVATE` for a left click on `HTCAPTION`.
             // The activation is only triggered when `DefWindowProc` handles the following `WM_NCLBUTTONDOWN`.
@@ -93,7 +95,7 @@ impl WindowsWindowInner {
             // press, `DefWindowProc` never sees it, so the window is never activated at all.
             // So, let's eagerly activate the window.
             WM_MOUSEACTIVATE => Some(MA_ACTIVATE as isize),
-            WM_ACTIVATE => self.handle_activate_msg(wparam),
+            WM_ACTIVATE => self.handle_activate_msg(handle, wparam),
             WM_CREATE => self.handle_create_msg(handle),
             WM_MOVE => self.handle_move_msg(handle, lparam),
             WM_SIZE => self.handle_size_msg(wparam, lparam),
@@ -114,8 +116,15 @@ impl WindowsWindowInner {
             // Treat double click as a second single click, since we track the double clicks ourselves.
             // If you don't interact with any elements, this will fall through to the windows default
             // behavior of toggling whether the window is maximized.
-            WM_NCLBUTTONDBLCLK | WM_NCLBUTTONDOWN => {
+            WM_NCLBUTTONDBLCLK => {
                 self.handle_nc_mouse_down_msg(handle, MouseButton::Left, wparam, lparam)
+            }
+            WM_NCLBUTTONDOWN => {
+                let handled = self.handle_nc_mouse_down_msg(handle, MouseButton::Left, wparam, lparam);
+                if handled.is_none() {
+                    crate::spike_trace::nudge_caption_press(handle, wparam); // spike switch
+                }
+                handled
             }
             WM_NCRBUTTONDOWN => {
                 self.handle_nc_mouse_down_msg(handle, MouseButton::Right, wparam, lparam)
@@ -162,11 +171,13 @@ impl WindowsWindowInner {
             | WM_GPUI_GPU_DEVICE_LOST => self.handle_gpui_events(handle, msg, wparam, lparam),
             _ => None,
         };
-        if let Some(n) = handled {
+        let result = if let Some(n) = handled {
             LRESULT(n)
         } else {
             unsafe { DefWindowProcW(handle, msg, wparam, lparam) }
-        }
+        };
+        crate::spike_trace::message_ends(handle, msg, trace);
+        result
     }
 
     fn handle_move_msg(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
@@ -795,7 +806,7 @@ impl WindowsWindowInner {
         }
     }
 
-    fn handle_activate_msg(self: &Rc<Self>, wparam: WPARAM) -> Option<isize> {
+    fn handle_activate_msg(self: &Rc<Self>, handle: HWND, wparam: WPARAM) -> Option<isize> {
         let activated = wparam.loword() > 0;
 
         let events = self
@@ -832,12 +843,15 @@ impl WindowsWindowInner {
             }
         }
 
+        let trace_window = SafeHwnd::from(handle);
         self.executor
             .spawn(async move {
+                let trace = crate::spike_trace::start(); // spike instrumentation
                 if let Some(mut func) = this.state.callbacks.active_status_change.take() {
                     func(activated);
                     this.state.callbacks.active_status_change.set(Some(func));
                 }
+                crate::spike_trace::span("active_status_change", trace_window.as_raw(), activated as i64, trace);
             })
             .detach();
 
@@ -1078,7 +1092,11 @@ impl WindowsWindowInner {
                 click_count,
                 first_mouse: false,
             });
+            // Spike instrumentation: anything slow here delays the move loop's start.
+            let trace = crate::spike_trace::start();
+            crate::spike_trace::mark("press_before_dispatch", handle, wparam.0 as i64);
             let handled = !func(input).propagate;
+            crate::spike_trace::span("press_after_dispatch", handle, handled as i64, trace);
             self.state.callbacks.input.set(Some(func));
 
             if handled {
@@ -1351,6 +1369,7 @@ impl WindowsWindowInner {
 
     #[inline]
     fn draw_window(&self, handle: HWND, force_render: bool) -> Option<isize> {
+        let trace = crate::spike_trace::start(); // spike instrumentation
         let Some(_guard) = self.state.draw_coordinator.try_begin_draw() else {
             log::debug!("deferring re-entrant draw of window {handle:?}");
             if force_render {
@@ -1399,6 +1418,7 @@ impl WindowsWindowInner {
         self.state.callbacks.request_frame.set(Some(request_frame));
         self.update_ime_enabled(handle);
         unsafe { ValidateRect(Some(handle), None).ok().log_err() };
+        crate::spike_trace::paint_done(handle, trace);
 
         Some(0)
     }

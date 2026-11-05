@@ -243,6 +243,7 @@ impl DirectXRenderer {
 
     #[inline]
     fn present(&mut self) -> Result<()> {
+        let trace = crate::spike_trace::start(); // spike instrumentation: any wait in `Present`
         let result = unsafe {
             self.resources
                 .as_ref()
@@ -250,6 +251,7 @@ impl DirectXRenderer {
                 .swap_chain
                 .Present(0, DXGI_PRESENT(0))
         };
+        crate::spike_trace::span("present", self.hwnd, 0, trace);
         result.ok().context("Presenting swap chain failed")
     }
 
@@ -940,7 +942,23 @@ impl DirectXResources {
 }
 
 impl DirectXRenderPipelines {
+    /// Spike patch: times the build for `MDV_TIMING`, so the log shows what a window costs now
+    /// that the bytecode is shared (see `shader_resources::RawShaderBytes`).
     pub fn new(device: &ID3D11Device) -> Result<Self> {
+        let started = std::time::Instant::now();
+        let built = match Self::build(device) {
+            // The device refused bytecode read from disk: compile, and overwrite what is there.
+            Err(err) if shader_resources::forget_disk_shaders() => {
+                log::warn!("Stored shaders refused, compiling: {err:#}");
+                Self::build(device)
+            }
+            built => built,
+        };
+        spike_timing::record_pipelines(started.elapsed());
+        built
+    }
+
+    fn build(device: &ID3D11Device) -> Result<Self> {
         let shadow_pipeline = PipelineState::new(
             device,
             "shadow_pipeline",
@@ -1703,26 +1721,58 @@ pub(crate) mod spike_timing {
 
     static TOTAL_NANOS: AtomicU64 = AtomicU64::new(0);
 
+    static COMPILES: AtomicU64 = AtomicU64::new(0);
+
+    /// One line per renderer built: only the first window in a process should have compiled.
+    pub(crate) fn record_pipelines(took: Duration) {
+        let Some(path) = std::env::var_os("MDV_TIMING") else { return };
+        append(
+            &path,
+            &format!(
+                "pipelines_ms={:.2} compiles_so_far={}",
+                took.as_secs_f64() * 1000.0,
+                COMPILES.load(Ordering::Relaxed)
+            ),
+        );
+    }
+
+    pub(crate) fn record_disk_shader(entry: &str) {
+        let Some(path) = std::env::var_os("MDV_TIMING") else { return };
+        append(&path, &format!("shader={entry} from_disk=1"));
+    }
+
     pub(crate) fn record_shader(entry: &str, took: Duration) {
         let Some(path) = std::env::var_os("MDV_TIMING") else { return };
+        COMPILES.fetch_add(1, Ordering::Relaxed);
         let total = TOTAL_NANOS.fetch_add(took.as_nanos() as u64, Ordering::Relaxed) + took.as_nanos() as u64;
+        append(
+            &path,
+            &format!(
+                "shader={} compile_ms={:.2} shader_total_ms={:.2}",
+                entry.trim_end_matches('\0'),
+                took.as_secs_f64() * 1000.0,
+                total as f64 / 1.0e6
+            ),
+        );
+    }
+
+    fn append(path: &std::ffi::OsStr, line: &str) {
         let epoch_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(
-                f,
-                "epoch_ms={epoch_ms:.1} shader={} compile_ms={:.2} shader_total_ms={:.2}",
-                entry.trim_end_matches('\0'),
-                took.as_secs_f64() * 1000.0,
-                total as f64 / 1.0e6
-            );
+            let _ = writeln!(f, "epoch_ms={epoch_ms:.1} {line}");
         }
     }
 }
 
 pub(crate) mod shader_resources {
+    use std::marker::PhantomData;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
     use anyhow::Result;
     use super::spike_timing;
 
@@ -1754,11 +1804,13 @@ pub(crate) mod shader_resources {
         Fragment,
     }
 
-    pub(crate) struct RawShaderBytes<'t> {
-        inner: &'t [u8],
+    /// Spike patch: compiled bytecode shared by the whole process. Pipelines are built per renderer
+    /// and so per window, and again after a lost device, but bytecode depends on neither.
+    static BYTECODE: Mutex<Vec<(ShaderModule, ShaderTarget, Arc<[u8]>)>> = Mutex::new(Vec::new());
 
-        #[cfg(all())]
-        _blob: ID3DBlob,
+    pub(crate) struct RawShaderBytes<'t> {
+        inner: Arc<[u8]>,
+        _borrow: PhantomData<&'t [u8]>,
     }
 
     impl<'t> RawShaderBytes<'t> {
@@ -1769,19 +1821,23 @@ pub(crate) mod shader_resources {
             }
             #[cfg(all())]
             {
-                let blob = build_shader_blob(module, target)?;
-                let inner = unsafe {
-                    std::slice::from_raw_parts(
-                        blob.GetBufferPointer() as *const u8,
-                        blob.GetBufferSize(),
-                    )
+                // Held across the compile, so a racing thread waits rather than compiling again.
+                let mut cache = BYTECODE.lock().unwrap_or_else(|e| e.into_inner());
+                let hit = cache.iter().find(|(m, t, _)| *m == module && *t == target);
+                let inner = match hit {
+                    Some((_, _, bytes)) => bytes.clone(),
+                    None => {
+                        let bytes = load_or_compile(module, target)?;
+                        cache.push((module, target, bytes.clone()));
+                        bytes
+                    }
                 };
-                Ok(Self { inner, _blob: blob })
+                Ok(Self { inner, _borrow: PhantomData })
             }
         }
 
         pub(crate) fn as_bytes(&'t self) -> &'t [u8] {
-            self.inner
+            &self.inner
         }
 
         #[cfg(any())]
@@ -1828,18 +1884,78 @@ pub(crate) mod shader_resources {
         }
     }
 
-    #[cfg(all())]
-    pub(super) fn build_shader_blob(entry: ShaderModule, target: ShaderTarget) -> Result<ID3DBlob> {
-        unsafe {
-            let shader_name = if matches!(entry, ShaderModule::EmojiRasterization) {
-                "color_text_raster.hlsl"
-            } else {
-                "shaders.hlsl"
-            };
+    static READ_FROM_DISK: AtomicBool = AtomicBool::new(false);
+    static IGNORE_DISK: AtomicBool = AtomicBool::new(false);
 
+    /// `MDV_NO_SHADER_DISK` turns the store off, to compare a cold start.
+    fn disk_dir() -> Option<PathBuf> {
+        if std::env::var_os("MDV_NO_SHADER_DISK").is_some() {
+            return None;
+        }
+        let base = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
+        Some(base.join("md-viewer").join("shader-cache"))
+    }
+
+    /// Drops everything cached if any of it came from disk, so the caller can retry on a fresh
+    /// compile. False if there is nothing to retry, which ends the retries as well.
+    pub(super) fn forget_disk_shaders() -> bool {
+        let mut cache = BYTECODE.lock().unwrap_or_else(|e| e.into_inner());
+        IGNORE_DISK.store(true, Ordering::Relaxed);
+        if !READ_FROM_DISK.swap(false, Ordering::Relaxed) {
+            return false;
+        }
+        cache.clear();
+        true
+    }
+
+    #[cfg(all())]
+    fn load_or_compile(module: ShaderModule, target: ShaderTarget) -> Result<Arc<[u8]>> {
+        // The emoji pair is built with the text system, which has no retry, and is the small file.
+        let stored = !matches!(module, ShaderModule::EmojiRasterization);
+        let dir = disk_dir().filter(|_| stored);
+        let name = format!("{}_{target:?}", module.as_str());
+        let key = crate::shader_disk::hash(&[
+            b"1",
+            name.as_bytes(),
+            &D3DCOMPILE_OPTIMIZATION_LEVEL3.to_le_bytes(),
+            shader_source(module).as_bytes(),
+        ]);
+        if let Some(dir) = dir.as_ref().filter(|_| !IGNORE_DISK.load(Ordering::Relaxed)) {
+            if let Some(bytes) = crate::shader_disk::read(dir, key) {
+                READ_FROM_DISK.store(true, Ordering::Relaxed);
+                spike_timing::record_disk_shader(&name);
+                return Ok(Arc::from(bytes));
+            }
+        }
+        let blob = build_shader_blob(module, target)?;
+        let bytes = unsafe {
+            std::slice::from_raw_parts(blob.GetBufferPointer() as *const u8, blob.GetBufferSize())
+        };
+        if let Some(dir) = &dir {
+            crate::shader_disk::write(dir, key, bytes);
+        }
+        Ok(Arc::from(bytes))
+    }
+
+    #[cfg(all())]
+    fn shader_source(module: ShaderModule) -> String {
+        if matches!(module, ShaderModule::EmojiRasterization) {
+            include_str!("color_text_raster.hlsl")
+        } else {
+            include_str!("shaders.hlsl")
+        }
+        .replace(
+            "#include \"alpha_correction.hlsl\"",
+            include_str!("alpha_correction.hlsl"),
+        )
+    }
+
+    #[cfg(all())]
+    fn build_shader_blob(module: ShaderModule, target: ShaderTarget) -> Result<ID3DBlob> {
+        unsafe {
             let entry = format!(
                 "{}_{}\0",
-                entry.as_str(),
+                module.as_str(),
                 match target {
                     ShaderTarget::Vertex => "vertex",
                     ShaderTarget::Fragment => "fragment",
@@ -1854,15 +1970,7 @@ pub(crate) mod shader_resources {
             // because cross-compiling from Linux has no fxc.exe to precompile the shaders.
             let mut compile_blob = None;
             let mut error_blob = None;
-            let source: String = if shader_name == "color_text_raster.hlsl" {
-                include_str!("color_text_raster.hlsl")
-            } else {
-                include_str!("shaders.hlsl")
-            }
-            .replace(
-                "#include \"alpha_correction.hlsl\"",
-                include_str!("alpha_correction.hlsl"),
-            );
+            let source = shader_source(module);
 
             let entry_point = PCSTR::from_raw(entry.as_ptr());
             let target_cstr = PCSTR::from_raw(target.as_ptr());

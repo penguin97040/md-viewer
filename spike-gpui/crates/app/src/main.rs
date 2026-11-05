@@ -83,6 +83,11 @@ fn main() {
     };
 
     application().with_assets(assets::Assets).run(move |cx: &mut App| {
+        // Greyscale text by default: the owner found it far easier to read in dark mode on a
+        // QD-OLED panel. MDV_TEXT=system keeps the platform's own smoothing, for comparison.
+        if std::env::var("MDV_TEXT").as_deref() != Ok("system") {
+            cx.set_text_rendering_mode(gpui::TextRenderingMode::Grayscale);
+        }
         cx.text_system()
             .add_fonts(vec![
                 Cow::Borrowed(assets::CHAKRA_REGULAR),
@@ -138,6 +143,7 @@ fn main() {
         }, cx)
         .unwrap();
         timing::log("window_created");
+        tab_move::prepare_ghost_soon(cx);
         if let Some(owner) = owner {
             tab_move::serve_launches(owner, cx);
         }

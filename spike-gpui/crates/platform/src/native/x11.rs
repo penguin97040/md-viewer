@@ -6,7 +6,7 @@ use std::cell::RefCell;
 
 use x11rb::connection::Connection;
 use x11rb::protocol::randr::ConnectionExt as _;
-use x11rb::protocol::xproto::{AtomEnum, ConfigureWindowAux, ConnectionExt as _, MapState, Window};
+use x11rb::protocol::xproto::{AtomEnum, ConfigureWindowAux, ConnectionExt as _, MapState, StackMode, Window};
 use x11rb::rust_connection::RustConnection;
 
 use super::{Hit, NativeWindow};
@@ -46,7 +46,7 @@ fn toplevel_of(conn: &RustConnection, root: Window, mut window: Window) -> Optio
     None
 }
 
-pub fn hit_at(known: &[NativeWindow], at: DesktopPoint) -> Option<Hit> {
+pub fn hit_at(known: &[NativeWindow], ignore: &[NativeWindow], at: DesktopPoint) -> Option<Hit> {
     with_connection(|conn, root| {
         let tops: Vec<Option<Window>> = known
             .iter()
@@ -56,8 +56,18 @@ pub fn hit_at(known: &[NativeWindow], at: DesktopPoint) -> Option<Hit> {
             })
             .collect();
 
+        let ignored: Vec<Window> = ignore
+            .iter()
+            .filter_map(|w| match w {
+                NativeWindow::X11(id) => toplevel_of(conn, root, *id),
+                _ => None,
+            })
+            .collect();
         let children = conn.query_tree(root).ok()?.reply().ok()?.children;
         for &child in children.iter().rev() {
+            if ignored.contains(&child) {
+                continue;
+            }
             // A window can vanish between the calls: skip it, it is not under the pointer.
             let Some(attrs) = conn.get_window_attributes(child).ok().and_then(|c| c.reply().ok()) else {
                 continue;
@@ -131,6 +141,27 @@ pub fn work_area_at(at: DesktopPoint) -> Option<DesktopRect> {
             (None, m) => m,
         }
     })
+}
+
+pub fn show_window(window: Window, rect: DesktopRect) {
+    with_connection(|conn, _| {
+        let aux = ConfigureWindowAux::new()
+            .x(rect.x)
+            .y(rect.y)
+            .width(rect.width.max(1) as u32)
+            .height(rect.height.max(1) as u32)
+            .stack_mode(StackMode::ABOVE);
+        conn.configure_window(window, &aux).ok()?;
+        conn.map_window(window).ok()?;
+        conn.flush().ok()
+    });
+}
+
+pub fn hide_window(window: Window) {
+    with_connection(|conn, _| {
+        conn.unmap_window(window).ok()?;
+        conn.flush().ok()
+    });
 }
 
 pub fn place_window(window: Window, rect: DesktopRect) {

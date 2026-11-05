@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     canvas, point, prelude::*, px, size, AnyWindowHandle, App, Bounds, DispatchPhase, Entity, Global,
-    KeyDownEvent, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point, TitlebarOptions, WeakEntity,
-    Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowId, WindowOptions,
+    CursorStyle, KeyDownEvent, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point, TitlebarOptions, WeakEntity,
+    Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowId, WindowKind, WindowOptions,
 };
 use mdv_platform::drag::{CancelReason, Machine, Step};
 use mdv_platform::native::{self, Backend, Hit, NativeWindow};
@@ -76,6 +76,54 @@ struct WindowEntry {
     scale: f32,
 }
 
+/// The small floating label that follows the pointer during a drag. It is not in `Registry::windows`,
+/// so nothing that counts viewers (routing, one tab per file, last window closed) sees it. There is
+/// one per process, hidden between drags: a new window costs far more than a frame on Windows.
+struct GhostWindow {
+    handle: AnyWindowHandle,
+    native: NativeWindow,
+    view: Entity<Ghost>,
+    /// The density the window was made at.
+    scale: f32,
+    /// Logical size, scaled to physical on each placement.
+    size: (f32, f32),
+    /// Where the window should be, physical pixels.
+    rect: DesktopRect,
+    shown: bool,
+}
+
+/// What the label shows, in the app's style.
+struct Ghost {
+    text: gpui::SharedString,
+    mode: mdv_theme::Mode,
+}
+
+impl Render for Ghost {
+    fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let p = *self.mode.palette();
+        gpui::div()
+            .size_full()
+            .flex()
+            .items_center()
+            .px(px(8.0))
+            .bg(crate::ui::c(p.bg_bar))
+            .border_1()
+            .border_color(crate::ui::c(p.border))
+            .text_color(crate::ui::c(p.text))
+            .font_family("Share Tech Mono")
+            .text_size(px(12.0))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .child(self.text.clone())
+    }
+}
+
+/// Offset of the label from the pointer, logical pixels, so it never sits under the hot spot.
+const GHOST_OFFSET: (f32, f32) = (14.0, 18.0);
+const GHOST_HEIGHT: f32 = 26.0;
+const GHOST_PREPARE_DELAY: Duration = Duration::from_millis(500);
+
 struct LiveDrag {
     source: WindowId,
     /// The latest pointer position in the source window's logical coordinates.
@@ -90,6 +138,10 @@ pub struct Registry {
     machine: Machine<TabId>,
     press_window: Option<WindowId>,
     drag: Option<LiveDrag>,
+    ghost: Option<GhostWindow>,
+    ghost_failed: bool,
+    /// When the live drag started, until its label has been shown.
+    drag_started: Option<Instant>,
     /// The press that ended on this frame was a drag, so the element's click must be ignored.
     swallow_click: bool,
     log: Option<File>,
@@ -120,6 +172,9 @@ pub fn install(cx: &mut App) {
     cx.on_window_closed(|cx, id| {
         let reg = cx.global_mut::<Registry>();
         reg.windows.retain(|w| w.id != id);
+        if reg.ghost.as_ref().is_some_and(|g| g.handle.window_id() == id) {
+            reg.ghost = None;
+        }
         let source_closed = reg.drag.as_ref().is_some_and(|d| d.source == id);
         if source_closed {
             cancel(CancelReason::SourceClosed, cx);
@@ -212,6 +267,12 @@ pub fn event_sink() -> impl IntoElement {
             if cx.global::<Registry>().log.is_some() {
                 cx.defer(log_layout_if_changed);
             }
+            // A closed hand on the source window while a drag is live. With the pointer captured
+            // this is also what shows outside the window, where the platform honours it.
+            let reg = cx.global::<Registry>();
+            if reg.drag.is_some() && reg.press_window == Some(id) {
+                window.set_window_cursor_style(CursorStyle::ClosedHand);
+            }
             window.on_mouse_event(|e: &MouseMoveEvent, phase, window, cx| {
                 if phase == DispatchPhase::Capture {
                     on_move(e, window, cx);
@@ -251,6 +312,7 @@ fn on_move(e: &MouseMoveEvent, window: &mut Window, cx: &mut App) {
         Step::Started { tab } => {
             reg.drag = Some(LiveDrag { source: id, last_local: e.position, target: Target::Unknown, marker_in: None });
             reg.swallow_click = true;
+            reg.drag_started = Some(Instant::now());
             log_state("drag-start", &format!("\"tab\":{tab}"), cx);
             set_moving(Some(tab), cx);
             start_autoscroll(cx);
@@ -298,6 +360,7 @@ pub fn cancel(reason: CancelReason, cx: &mut App) -> bool {
 
 fn finish_cancel(reason: CancelReason, cx: &mut App) {
     clear_marker(cx);
+    remove_ghost(cx);
     set_moving(None, cx);
     let reg = cx.global_mut::<Registry>();
     reg.drag = None;
@@ -310,20 +373,16 @@ fn resolve(cx: &mut App) -> Target {
     let reg = cx.global::<Registry>();
     let Some(drag) = reg.drag.as_ref() else { return Target::Unknown };
     let Some(source_ix) = reg.windows.iter().position(|w| w.id == drag.source) else { return Target::Unknown };
-    let source = &reg.windows[source_ix];
     let local = drag.last_local;
 
     // Platforms with no desktop coordinates (Wayland, and macOS until it has an adapter) can still
     // reorder inside the source strip. Anything else on them cancels.
-    let Some(origin) = native::client_origin(source.native) else {
+    let Some(at) = pointer_desktop(cx) else {
         return target_in_window(source_ix, local, cx).unwrap_or(Target::Unknown);
     };
-    let at = DesktopPoint {
-        x: origin.x + (f32::from(local.x) * source.scale).round() as i32,
-        y: origin.y + (f32::from(local.y) * source.scale).round() as i32,
-    };
     let known: Vec<NativeWindow> = reg.windows.iter().map(|w| w.native).collect();
-    match native::hit_at(&known, at) {
+    let ignore: Vec<NativeWindow> = reg.ghost.iter().map(|g| g.native).collect();
+    match native::hit_at(&known, &ignore, at) {
         None => Target::Unknown,
         Some(Hit::Outside) => Target::Outside(at),
         Some(Hit::Ours(i)) => {
@@ -332,6 +391,196 @@ fn resolve(cx: &mut App) -> Target {
             let local = point(px((at.x - o.x) as f32 / w.scale), px((at.y - o.y) as f32 / w.scale));
             target_in_window(i, local, cx).unwrap_or(Target::InViewer)
         }
+    }
+}
+
+/// The pointer on the desktop in physical pixels, or `None` where the platform cannot say.
+fn pointer_desktop(cx: &App) -> Option<DesktopPoint> {
+    let reg = cx.global::<Registry>();
+    let drag = reg.drag.as_ref()?;
+    let source = reg.windows.iter().find(|w| w.id == drag.source)?;
+    let origin = native::client_origin(source.native)?;
+    Some(DesktopPoint {
+        x: origin.x + (f32::from(drag.last_local.x) * source.scale).round() as i32,
+        y: origin.y + (f32::from(drag.last_local.y) * source.scale).round() as i32,
+    })
+}
+
+/// Shows the label on first call during a drag, then moves it with the pointer. Omitted where the
+/// platform gives no desktop coordinates (Wayland), as it could not be placed.
+fn update_ghost(cx: &mut App) {
+    let Some(at) = pointer_desktop(cx) else { return };
+    let (tab, source_scale, backend, mode) = {
+        let reg = cx.global::<Registry>();
+        let Some(drag) = reg.drag.as_ref() else { return };
+        let Some(w) = reg.windows.iter().find(|w| w.id == drag.source) else { return };
+        let Some(view) = w.view.upgrade() else { return };
+        let v = view.read(cx);
+        let name = v.moving.and_then(|id| v.tabs.iter().find(|t| t.id == id)).map(|t| t.name.clone());
+        (name, w.scale, w.native.backend(), v.mode)
+    };
+    let scale = native::scale_at(backend, at).unwrap_or(source_scale);
+    if let Some(g) = cx.global_mut::<Registry>().ghost.as_mut().filter(|g| g.shown) {
+        g.rect = ghost_rect(at, g.size, scale);
+        native::place_ghost(g.native, g.rect);
+        return;
+    }
+    let Some(text) = tab else { return };
+    let chars = text.chars().count() as f32;
+    let size = ((chars * 7.4 + 18.0).clamp(60.0, 200.0), GHOST_HEIGHT);
+    let rect = ghost_rect(at, size, scale);
+    // A window made at one density cannot be relied on to change while hidden, so this makes a new
+    // one where the old one would be wrong. Only a screen of another density comes this way.
+    if cx.global::<Registry>().ghost.as_ref().is_some_and(|g| (g.scale - scale).abs() > 0.01) {
+        if let Some(old) = cx.global_mut::<Registry>().ghost.take() {
+            old.handle.update(cx, |_, w, _| w.remove_window()).ok();
+        }
+    }
+    let Some(view) = cx.global::<Registry>().ghost.as_ref().map(|g| g.view.clone()) else {
+        open_ghost(Some(rect), at, scale, text, mode, cx);
+        return;
+    };
+    view.update(cx, |g, cx| {
+        g.text = text;
+        g.mode = mode;
+        cx.notify();
+    });
+    if let Some(g) = cx.global_mut::<Registry>().ghost.as_mut() {
+        g.size = size;
+        g.rect = rect;
+        g.shown = true;
+    }
+    log_state("ghost-open", "", cx);
+    // From a task, not here. App is borrowed here, and resizing and showing the window call back
+    // into the window procedure, which needs App to take the new size and draw the new text. On
+    // Windows the show itself draws, before the window appears, so the last name never flashes.
+    cx.spawn(async move |cx| {
+        let wanted = cx.update(|cx| cx.global::<Registry>().ghost.as_ref().filter(|g| g.shown).map(|g| (g.native, g.rect)));
+        if let Some((native_window, rect)) = wanted {
+            native::show_ghost(native_window, rect);
+            cx.update(note_ghost_shown);
+        }
+    })
+    .detach();
+}
+
+fn note_ghost_shown(cx: &mut App) {
+    let since = cx.global_mut::<Registry>().drag_started.take();
+    if let Some(since) = since {
+        let ms = since.elapsed().as_secs_f64() * 1000.0;
+        crate::timing::log(&format!("label_shown ms_since_drag_start={ms:.1}"));
+        log_state("ghost-shown", &format!("\"ms\":{ms:.1}"), cx);
+    }
+}
+
+/// Makes the label's window, which is hidden unless `shown_at` says where to show it.
+fn open_ghost(shown_at: Option<DesktopRect>, at: DesktopPoint, scale: f32, text: gpui::SharedString, mode: mdv_theme::Mode, cx: &mut App) {
+    let started = Instant::now();
+    let size = (60.0, GHOST_HEIGHT);
+    let bounds = match shown_at {
+        Some(rect) => to_logical(rect, scale),
+        // Parked: an X11 window is mapped whatever `show` says, until the call below hides it.
+        None => Bounds::new(point(px(-10000.0), px(-10000.0)), gpui::size(px(size.0), px(size.1))),
+    };
+    let on_screen = point(px(at.x as f32 / scale), px(at.y as f32 / scale));
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_background: WindowBackgroundAppearance::Opaque,
+        kind: WindowKind::PopUp,
+        titlebar: None,
+        focus: false,
+        show: shown_at.is_some(),
+        is_movable: false,
+        is_resizable: false,
+        is_minimizable: false,
+        app_id: Some("md-viewer".into()),
+        display_id: cx.displays().iter().find(|d| d.bounds().contains(&on_screen)).map(|d| d.id()),
+        ..Default::default()
+    };
+    let mut made = None;
+    let opened = cx.open_window(options, |window, cx| {
+        let native_window = raw_window_handle::HasWindowHandle::window_handle(&*window)
+            .map(|h| NativeWindow::from_raw(h.as_raw()))
+            .unwrap_or(NativeWindow::Other(Backend::Unknown));
+        let view = cx.new(|_| Ghost { text, mode });
+        made = Some((native_window, view.clone(), window.scale_factor()));
+        view
+    });
+    match (opened, made) {
+        (Ok(handle), Some((native_window, view, window_scale))) => {
+            native::prepare_ghost(native_window);
+            let rect = shown_at.unwrap_or(DesktopRect { x: -10000, y: -10000, width: 0, height: 0 });
+            match shown_at {
+                Some(rect) => native::place_ghost(native_window, rect),
+                None => native::hide_ghost(native_window),
+            }
+            cx.global_mut::<Registry>().ghost = Some(GhostWindow {
+                handle: handle.into(),
+                native: native_window,
+                view,
+                scale: window_scale,
+                size,
+                rect,
+                shown: shown_at.is_some(),
+            });
+            let ms = started.elapsed().as_secs_f64() * 1000.0;
+            crate::timing::log(&format!("label_window_created ms={ms:.1} hidden={}", shown_at.is_none()));
+            log_state("ghost-created", &format!("\"ms\":{ms:.1},\"hidden\":{}", shown_at.is_none()), cx);
+            if shown_at.is_some() {
+                log_state("ghost-open", "", cx);
+                note_ghost_shown(cx);
+            }
+        }
+        (opened, _) => {
+            // No label is not a failed drag, and it will not work any better on the next move.
+            let why = opened.err().map_or(String::new(), |e| e.to_string().replace('"', "'"));
+            cx.global_mut::<Registry>().ghost_failed = true;
+            log_state("ghost-failed", &format!("\"why\":\"{why}\""), cx);
+        }
+    }
+}
+
+/// Makes the hidden label shortly after launch, so the first drag has nothing to wait for. Late
+/// enough not to delay the first window; a drag that gets in first makes it itself.
+pub fn prepare_ghost_soon(cx: &mut App) {
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(GHOST_PREPARE_DELAY).await;
+        cx.update(prepare_ghost);
+    })
+    .detach();
+}
+
+fn prepare_ghost(cx: &mut App) {
+    let reg = cx.global::<Registry>();
+    if reg.ghost.is_some() || reg.ghost_failed || reg.drag.is_some() {
+        return;
+    }
+    let Some(w) = reg.windows.first() else { return };
+    // No desktop coordinates (Wayland): there will never be a label to place.
+    let Some(at) = native::client_origin(w.native) else { return };
+    let scale = w.scale;
+    let Some(view) = w.view.upgrade() else { return };
+    let mode = view.read(cx).mode;
+    open_ghost(None, at, scale, gpui::SharedString::default(), mode, cx);
+}
+
+fn ghost_rect(at: DesktopPoint, size: (f32, f32), scale: f32) -> DesktopRect {
+    DesktopRect {
+        x: at.x + (GHOST_OFFSET.0 * scale).round() as i32,
+        y: at.y + (GHOST_OFFSET.1 * scale).round() as i32,
+        width: (size.0 * scale).round() as i32,
+        height: (size.1 * scale).round() as i32,
+    }
+}
+
+/// Hides the label until the next drag. Safe to call when there is none.
+fn remove_ghost(cx: &mut App) {
+    let reg = cx.global_mut::<Registry>();
+    reg.drag_started = None;
+    if let Some(g) = reg.ghost.as_mut().filter(|g| g.shown) {
+        g.shown = false;
+        native::hide_ghost(g.native);
+        log_state("ghost-closed", "", cx);
     }
 }
 
@@ -355,6 +604,7 @@ fn update_target(cx: &mut App) {
     if cx.global::<Registry>().drag.is_none() {
         return;
     }
+    update_ghost(cx);
     let target = resolve(cx);
     let reg = cx.global_mut::<Registry>();
     let Some(drag) = reg.drag.as_mut() else { return };
@@ -490,6 +740,7 @@ fn autoscroll_tick(cx: &mut App) -> bool {
 fn finish_drop(tab: TabId, cx: &mut App) {
     let target = if cx.global::<Registry>().drag.is_some() { resolve(cx) } else { Target::Unknown };
     clear_marker(cx);
+    remove_ghost(cx);
     set_moving(None, cx);
     let Some(drag) = cx.global_mut::<Registry>().drag.take() else { return };
     let reg = cx.global_mut::<Registry>();
