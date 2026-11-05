@@ -83,6 +83,10 @@ fn main() {
     };
 
     application().with_assets(assets::Assets).run(move |cx: &mut App| {
+        // Spike switch: compare text smoothing on displays where subpixel rendering fringes.
+        if std::env::var("MDV_TEXT").as_deref() == Ok("grayscale") {
+            cx.set_text_rendering_mode(gpui::TextRenderingMode::Grayscale);
+        }
         cx.text_system()
             .add_fonts(vec![
                 Cow::Borrowed(assets::CHAKRA_REGULAR),
