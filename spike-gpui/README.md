@@ -62,3 +62,14 @@ python3 scripts/generate-theme.py
 
 This rewrites `frontend/theme.css`, `theme_colours.go` and
 `spike-gpui/crates/theme/src/generated.rs`. The first two must stay byte-identical.
+
+## Demo switches (environment variables)
+
+The chrome runs on stub data. `MDV_DEMO` takes a comma list: `tabs`, `light`, `find`, `settings`,
+`tools` (narrow overflow menu), `web`, `toast`, `toc100k` (a 100,000-heading outline).
+`MDV_SIZE=800x600` sets the window size, `MDV_PLATFORM=mac` forces the macOS layout, and
+`MDV_PERF=1` prints first-render and TOC row-build timings.
+
+X11 note: GPUI only drops the window manager frame when a compositor is running and the window
+manager advertises `_GTK_FRAME_EXTENTS` (xfwm4 does; Openbox does not). Without both, the
+system frame stays and the app header sits inside it.

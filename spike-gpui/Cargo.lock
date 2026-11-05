@@ -2923,21 +2923,35 @@ dependencies = [
 name = "md-viewer-gpui"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "gpui-pre",
  "gpui-pre-platform",
+ "mdv-content",
+ "mdv-platform",
+ "mdv-reader",
+ "mdv-theme",
 ]
 
 [[package]]
 name = "mdv-content"
 version = "0.0.0"
+dependencies = [
+ "mdv-theme",
+]
 
 [[package]]
 name = "mdv-platform"
 version = "0.0.0"
+dependencies = [
+ "mdv-theme",
+]
 
 [[package]]
 name = "mdv-reader"
 version = "0.0.0"
+dependencies = [
+ "mdv-theme",
+]
 
 [[package]]
 name = "mdv-theme"

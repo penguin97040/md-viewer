@@ -3,3 +3,6 @@ name = "mdv-platform"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
+
+[dependencies]
+mdv-theme.workspace = true

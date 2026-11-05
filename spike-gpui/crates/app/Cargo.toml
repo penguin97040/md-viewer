@@ -6,4 +6,9 @@ publish.workspace = true
 
 [dependencies]
 gpui.workspace = true
+anyhow.workspace = true
 gpui_platform.workspace = true
+mdv-theme.workspace = true
+mdv-reader.workspace = true
+mdv-content.workspace = true
+mdv-platform.workspace = true

@@ -13,3 +13,8 @@ gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 [workspace.dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.11" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+anyhow = "=1.0.104"
+mdv-theme = { path = "crates/theme" }
+mdv-reader = { path = "crates/reader" }
+mdv-content = { path = "crates/content" }
+mdv-platform = { path = "crates/platform" }
