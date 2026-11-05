@@ -16,6 +16,8 @@ use std::sync::Arc;
 
 mod guard;
 mod math;
+#[cfg(feature = "merman")]
+mod merman_backend;
 mod mermaid;
 mod raster;
 pub mod svgcheck;

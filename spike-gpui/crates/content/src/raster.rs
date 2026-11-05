@@ -2,9 +2,9 @@ use std::sync::{Arc, OnceLock};
 
 use crate::{limits, ContentError, RenderedAsset};
 
-const CHAKRA_REGULAR: &[u8] = include_bytes!("../../../../frontend/fonts/ChakraPetch-Regular.ttf");
-const CHAKRA_SEMIBOLD: &[u8] = include_bytes!("../../../../frontend/fonts/ChakraPetch-SemiBold.ttf");
-const SHARE_TECH_MONO: &[u8] = include_bytes!("../../../../frontend/fonts/ShareTechMono-Regular.ttf");
+pub(crate) const CHAKRA_REGULAR: &[u8] = include_bytes!("../../../../frontend/fonts/ChakraPetch-Regular.ttf");
+pub(crate) const CHAKRA_SEMIBOLD: &[u8] = include_bytes!("../../../../frontend/fonts/ChakraPetch-SemiBold.ttf");
+pub(crate) const SHARE_TECH_MONO: &[u8] = include_bytes!("../../../../frontend/fonts/ShareTechMono-Regular.ttf");
 
 /// Straight-alpha RGBA8 pixels, row-major, `width * height * 4` bytes.
 #[derive(Clone, Debug)]
