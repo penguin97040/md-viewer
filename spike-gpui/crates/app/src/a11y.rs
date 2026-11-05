@@ -8,13 +8,18 @@
 //! real zero-size element: the synthetic-children builder only appends leaves to the current node, so
 //! nesting has to come from elements. A node listed under two parents panics in AccessKit, in release
 //! builds too, so the reader must keep its tree well formed. `ScrollIntoView` on a node at the edge of
-//! the window scrolls the view, and the window moves.
+//! the window scrolls the view, and the window moves. A screen reader moves through the Document's
+//! Text interface instead (Orca, in browse mode), so the Document also exposes a caret, and moving
+//! that caret towards the edge moves the window too. AT-SPI text offsets count from the start of the
+//! Document, so dropping paragraphs from the front while Orca reads makes it skip text. The window
+//! therefore only grows forward, up to `MAX_EXPOSED`, and drops its front only on a jump or at the cap.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
-use gpui::accesskit::{self, Action, Live, Node, Role};
+use gpui::accesskit::{self, Action, ActionData, Live, Node, NodeId, Role};
 use gpui::{
     div, prelude::*, px, uniform_list, A11ySubtreeBuilder, Context, ElementId, Hsla, ScrollStrategy,
     UniformListScrollHandle,
@@ -51,6 +56,8 @@ pub fn input_text(text: String) -> impl FnOnce(&mut A11ySubtreeBuilder<'_>) + 's
 // ---- the document sample (MDV_A11Y_DOC=<paragraphs>) -------------------------------------------
 
 const ROW: f32 = 28.0;
+/// Measured at about 3,000 paragraphs with no visible CPU cost (see the spike report).
+const MAX_EXPOSED: usize = 3000;
 
 pub struct DocSample {
     pub paragraphs: usize,
@@ -58,13 +65,19 @@ pub struct DocSample {
     pub overscan: usize,
     pub scroll: UniformListScrollHandle,
     pub visible: Rc<RefCell<Range<usize>>>,
+    /// Paragraph index and character offset of the assistive technology's caret.
+    pub caret: Rc<Cell<(usize, usize)>>,
+    /// Text run node ids exposed this frame, by paragraph. Only the builder can derive them.
+    pub runs: Rc<RefCell<HashMap<usize, NodeId>>>,
+    /// The first exposed paragraph. Kept still while reading forward, so text offsets stay valid.
+    pub window_start: Cell<usize>,
 }
 
 impl DocSample {
     pub fn from_env() -> Option<Self> {
         let paragraphs = std::env::var("MDV_A11Y_DOC").ok()?.parse().ok()?;
         let overscan = std::env::var("MDV_A11Y_OVERSCAN").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
-        Some(Self { paragraphs, overscan, scroll: UniformListScrollHandle::new(), visible: Rc::default() })
+        Some(Self { paragraphs, overscan, scroll: UniformListScrollHandle::new(), visible: Rc::default(), caret: Rc::default(), runs: Rc::default(), window_start: Cell::new(0) })
     }
 }
 
@@ -102,11 +115,17 @@ pub fn doc_sample<V: 'static + Render>(sample: &DocSample, text: Hsla, cx: &mut 
     .h_full();
 
     let seen = visible.borrow().clone();
-    let first = seen.start.saturating_sub(sample.overscan);
+    let wanted = seen.start.saturating_sub(sample.overscan);
     let last = (seen.end + sample.overscan).min(n);
+    if wanted < sample.window_start.get() || last - sample.window_start.get() > MAX_EXPOSED {
+        sample.window_start.set(wanted);
+    }
+    let first = sample.window_start.get();
+    sample.runs.borrow_mut().clear();
     let blocks = (first..last).map(|i| {
         let body = paragraph_text(i);
         let scroll = scroll.clone();
+        let runs = sample.runs.clone();
         div()
             .id(ElementId::NamedInteger("block".into(), i as u64))
             .role(if is_heading(i) { Role::Heading } else { Role::Paragraph })
@@ -127,8 +146,34 @@ pub fn doc_sample<V: 'static + Render>(sample: &DocSample, text: Hsla, cx: &mut 
                 run.set_value(body);
                 let id = b.synthetic_node_id("run");
                 b.push_child(id, run);
+                runs.borrow_mut().insert(i, id);
             })
     });
+    let blocks: Vec<_> = blocks.collect();
+
+    // The caret, for AT-SPI's Text interface. Without one Orca reports offset -1 and moves on its
+    // own, so the app never hears where the reader is.
+    let (caret, runs) = (sample.caret.clone(), sample.runs.clone());
+    let expose_caret = move |b: &mut A11ySubtreeBuilder<'_>| {
+        let (i, at) = caret.get();
+        let runs = runs.borrow();
+        let Some(id) = runs.get(&i).or_else(|| runs.keys().min().and_then(|k| runs.get(k))) else { return };
+        let pos = accesskit::TextPosition { node: *id, character_index: at };
+        b.parent_node().set_text_selection(accesskit::TextSelection { anchor: pos, focus: pos });
+    };
+    let (caret, runs, follow, seen_now) = (sample.caret.clone(), sample.runs.clone(), scroll.clone(), visible.clone());
+    let follow_caret = move |data: Option<&ActionData>, window: &mut gpui::Window, _: &mut gpui::App| {
+        let Some(ActionData::SetTextSelection(sel)) = data else { return };
+        let found = runs.borrow().iter().find(|(_, id)| **id == sel.focus.node).map(|(i, _)| *i);
+        if let Some(i) = found {
+            caret.set((i, sel.focus.character_index));
+            let seen = seen_now.borrow().clone();
+            if i + 3 >= seen.end || i < seen.start {
+                follow.scroll_to_item_strict(i, ScrollStrategy::Top);
+            }
+            window.refresh();
+        }
+    };
 
     div()
         .id("doc")
@@ -136,6 +181,8 @@ pub fn doc_sample<V: 'static + Render>(sample: &DocSample, text: Hsla, cx: &mut 
         .aria_label("Document")
         .focusable()
         .tab_stop(true)
+        .a11y_synthetic_children(expose_caret)
+        .on_a11y_action(Action::SetTextSelection, follow_caret)
         .relative()
         .flex()
         .flex_1()
