@@ -50,3 +50,38 @@ krilla = { version = "=0.8.2", default-features = false, features = ["raster-ima
 krilla-svg = "=0.8.1"
 rustybuzz = "=0.20.1"
 png = "=0.17.16"
+
+# Measured on the spike: Windows 102 MB by default, 72 MB stripped, 40 MB with fat LTO, 30 MB with
+# opt-level "s", 26 MB with this profile, 25 MB with "z" everywhere (which nearly doubles find time).
+# Keep panic = "unwind": diagram, maths, PDF and layout panics are contained with catch_unwind.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = "s"
+strip = true
+
+# The largest code by far and none of it on the scrolling path, so it gets "z".
+[profile.release.package.merman]
+opt-level = "z"
+[profile.release.package.merman-core]
+opt-level = "z"
+[profile.release.package.merman-render]
+opt-level = "z"
+[profile.release.package.merman-model]
+opt-level = "z"
+[profile.release.package.merman-markup]
+opt-level = "z"
+[profile.release.package.merman-export]
+opt-level = "z"
+[profile.release.package.dugong]
+opt-level = "z"
+[profile.release.package.manatee]
+opt-level = "z"
+[profile.release.package.html5ever]
+opt-level = "z"
+[profile.release.package.krilla]
+opt-level = "z"
+[profile.release.package.krilla-svg]
+opt-level = "z"
+[profile.release.package.write-fonts]
+opt-level = "z"

@@ -54,6 +54,21 @@ shader bytes and the release build fails to compile. The vendored copy compiles 
 HLSL when the app starts, using the system `d3dcompiler_47.dll` (the same compiler the upstream
 debug build already uses). Cost: a short start-up delay. Risk: it has not been run on Windows.
 
+## Release builds
+
+The workspace's release profile is fat LTO, `opt-level = "s"` with `"z"` for diagrams and PDF, and
+stripped symbols. `panic` stays `unwind`, as render panics are contained with `catch_unwind`.
+
+Compiled-in panic messages hold source paths. Stable Cargo has no `trim-paths`, so a build for
+publishing replaces those prefixes:
+
+```sh
+export RUSTFLAGS="--remap-path-prefix=$HOME/.cargo=/cargo --remap-path-prefix=$HOME/.rustup=/rustup --remap-path-prefix=$(git rev-parse --show-toplevel)=/src"
+cargo build --release --target x86_64-pc-windows-gnu
+```
+
+Check the result with `strings -a <exe> | grep -E "/home/|/Users/|C:.Users"`, which should print nothing.
+
 ## Regenerating theme tokens
 
 ```sh
