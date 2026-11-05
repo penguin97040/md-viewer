@@ -44,7 +44,10 @@ fn syntax(lang: &str) -> Option<&'static SyntaxReference> {
 /// The token class for one TextMate scope, or `None` to look further down the stack.
 fn class_of(scope: &str) -> Option<T> {
     let starts = |p: &str| scope == p || (scope.starts_with(p) && scope.as_bytes().get(p.len()) == Some(&b'.'));
-    Some(if starts("comment") || starts("punctuation.definition.comment") {
+    // Python docstrings are comments in the grammar and strings in chroma.
+    Some(if scope.starts_with("comment.block.documentation") && scope.ends_with(".python") || scope.starts_with("punctuation.definition.comment.begin.documentation") {
+        T::String
+    } else if starts("comment") || starts("punctuation.definition.comment") {
         T::Comment
     } else if starts("meta.preprocessor") || starts("keyword.control.import.include") {
         T::CommentPreproc
@@ -155,12 +158,26 @@ pub fn highlight(lang: &str, code: &str, base: u32) -> Vec<CodeToken> {
             if from >= to {
                 return;
             }
-            if let Some(class) = class_of_stack(stack) {
-                let (a, b) = (base + (at + from) as u32, base + (at + to) as u32);
+            let mut push = |x: usize, y: usize, class: T| {
+                let (a, b) = (base + (at + x) as u32, base + (at + y) as u32);
                 match out.last_mut() {
                     Some(t) if t.class == class && t.span.end == a => t.span.end = b,
                     _ => out.push(CodeToken { span: ByteSpan::new(a, b), class }),
                 }
+            };
+            if let Some(class) = class_of_stack(stack) {
+                push(from, to, class);
+                return;
+            }
+            // Grammars leave plain identifiers and some punctuation unscoped, where chroma says
+            // Name and Punctuation, which have colours of their own.
+            let seg = &line[from..to];
+            let mut i = 0;
+            for (word_like, chunk) in split_plain(seg) {
+                if !chunk.trim().is_empty() {
+                    push(from + i, from + i + chunk.len(), if word_like { T::Name } else { T::Punctuation });
+                }
+                i += chunk.len();
             }
         };
         for (pos, op) in ops {
@@ -180,6 +197,25 @@ pub fn highlight(lang: &str, code: &str, base: u32) -> Vec<CodeToken> {
         t.span.end = t.span.end.min(end);
         !t.span.is_empty()
     });
+    out
+}
+
+/// Splits unscoped text into runs of identifier characters and everything else.
+fn split_plain(s: &str) -> Vec<(bool, &str)> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut cur = None;
+    for (i, c) in s.char_indices() {
+        let w = c.is_alphanumeric() || c == '_';
+        if cur.is_some_and(|x| x != w) {
+            out.push((cur.expect("run"), &s[start..i]));
+            start = i;
+        }
+        cur = Some(w);
+    }
+    if let Some(w) = cur {
+        out.push((w, &s[start..]));
+    }
     out
 }
 

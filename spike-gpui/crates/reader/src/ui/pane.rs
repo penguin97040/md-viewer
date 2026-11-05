@@ -102,6 +102,12 @@ pub struct Perf {
     pub opened_at: Option<Instant>,
 }
 
+impl Perf {
+    pub fn reset_interval(&mut self) {
+        self.last_paint = None;
+    }
+}
+
 #[derive(Clone)]
 pub struct Visible {
     pub chunk: usize,
@@ -248,6 +254,15 @@ impl ReaderView {
         self.doc = Some(doc);
     }
 
+    /// Installs the asset provider. Everything laid out with placeholders is redone, keeping the
+    /// text at the top of the view where it is. This is the path an async render arrival takes.
+    pub fn set_assets(&mut self, assets: Option<Arc<dyn Assets + Send + Sync>>) {
+        self.capture_text_anchor();
+        self.assets = assets;
+        self.layouts.clear();
+        self.prefetch_queue_gen += 1;
+    }
+
     fn effective(&self) -> Settings {
         self.settings_override.unwrap_or(self.settings)
     }
@@ -268,6 +283,10 @@ impl ReaderView {
 
     fn height(&self, i: usize) -> f32 {
         self.measured[i].unwrap_or_else(|| (self.raw[i] * self.ratio()).round().max(1.0))
+    }
+
+    fn known_height(&self, i: usize) -> f32 {
+        self.layouts.get(&i).map_or_else(|| self.height(i), |l| l.height)
     }
 
     fn ensure_prefix(&mut self) {
@@ -291,7 +310,7 @@ impl ReaderView {
         self.prefix[self.anchor.0.min(self.prefix.len() - 1)] + self.anchor.1 as f64
     }
 
-    fn set_scroll_y(&mut self, y: f64) {
+    pub fn set_scroll_y(&mut self, y: f64) {
         self.ensure_prefix();
         let n = self.prefix.len() - 1;
         if n == 0 {
@@ -438,18 +457,27 @@ impl ReaderView {
             self.text_anchor = None;
         }
 
-        // Normalise the anchor into its chunk.
+        // Normalise the anchor into its chunk. A short move uses real layouts; a long one steps
+        // over chunks on their known or estimated heights, without laying out what it passes.
         let (mut i, mut off) = self.anchor;
         i = i.min(n - 1);
+        let near = 3.0 * view_h;
         while off < 0.0 && i > 0 {
             i -= 1;
-            let h = self.layout_of(i, &opts, window).height;
+            let h = if -off < near { self.layout_of(i, &opts, window).height } else { self.known_height(i) };
             off += h;
         }
         off = off.max(0.0);
         loop {
-            let h = self.layout_of(i, &opts, window).height;
+            let h = if off < near { self.layout_of(i, &opts, window).height } else { self.known_height(i) };
             if off < h || i + 1 >= n {
+                if off >= near {
+                    // Landed on an estimate: settle on the real height.
+                    if off < self.layout_of(i, &opts, window).height || i + 1 >= n {
+                        break;
+                    }
+                    continue;
+                }
                 break;
             }
             off -= h;
@@ -909,10 +937,8 @@ impl ReaderView {
         if d.moved {
             return;
         }
-        // A click without a drag: no selection is left behind, and a target may fire.
-        if d.gran == Granularity::Char && !e.modifiers.shift {
-            self.selection = None;
-        }
+        // A click without a drag leaves a collapsed selection, the caret a shift-click extends,
+        // and a target may fire.
         if let (Some((chunk, kind)), Some((c2, h2))) = (d.hit, self.hit_under(e.position)) {
             if c2 == chunk && same_target(&kind, &h2.kind) {
                 self.activate(chunk, &kind, window, cx);
@@ -1217,6 +1243,23 @@ impl ReaderView {
         let c = doc.chunk(v.chunk);
         let Some((byte, _)) = v.layout.text_at_y(self.anchor.1) else { return String::new() };
         c.text[byte as usize..].chars().take(n).collect::<String>().replace('\n', "⏎")
+    }
+
+    /// Window coordinates of a visible link's first fragment, for scripted clicks.
+    pub fn link_point(&self, target: &str) -> Option<(i32, i32)> {
+        let view_h = f32::from(self.bounds.size.height);
+        for v in &self.visible {
+            for h in &v.layout.hits {
+                let HitKind::Link(i) = h.kind else { continue };
+                let matches = v.layout.links.get(i as usize).is_some_and(|l| format!("{l:?}").contains(target));
+                let y = v.y + h.rect.y + h.rect.h / 2.0;
+                if matches && y > 0.0 && y < view_h {
+                    let x = f32::from(self.bounds.origin.x) + h.rect.x + h.rect.w / 2.0;
+                    return Some((x as i32, (f32::from(self.bounds.origin.y) + y) as i32));
+                }
+            }
+        }
+        None
     }
 
     /// Chunk, fractional offset, and the first text at the top of the view.
@@ -1616,7 +1659,7 @@ fn paint_box(b: &TextBox, ox: f32, oy: f32, view_top: f32, view_bottom: f32, c: 
             let x = ox + l.x + g.x0 - l.x_shift;
             let s = &b.spans[g.span as usize];
             if g.flags & FLAG_ATOM != 0 {
-                paint_atom(&b.atoms[g.id as usize], x, baseline + s.descent, images, window);
+                paint_atom(&b.atoms[g.id as usize], x, baseline + s.descent, s.color, images, window);
                 continue;
             }
             let selected = sel.is_some_and(|(lo, hi)| g.byte >= lo && g.byte < hi);
@@ -1661,13 +1704,18 @@ fn text_box_on_line(b: &TextBox, l: &layout::Line, byte: u32) -> (f32, f32) {
     }
 }
 
-fn paint_atom(a: &layout::AtomDraw, x: f32, bottom: f32, images: &ImageStore, window: &mut Window) {
+fn paint_atom(a: &layout::AtomDraw, x: f32, bottom: f32, color: u32, images: &ImageStore, window: &mut Window) {
     match a {
         layout::AtomDraw::Image { key, w, h } => {
             if let Some(img) = images.by_key(*key) {
                 let bounds = Bounds::new(point(px(x), px(bottom - h)), size(px(*w), px(*h)));
                 let _ = window.paint_image(bounds, bounds, Corners::all(px(0.0)), img, 0, false);
             }
+        }
+        // A held web image with no alt text: `min-width: 2em; min-height: 1.4em` in a dashed box.
+        layout::AtomDraw::EmptyBox { w, h } if *w > 0.0 => {
+            let bounds = Bounds::new(point(px(x), px(bottom - h)), size(px(*w), px(*h)));
+            window.paint_quad(quad(bounds, Corners::all(px(0.0)), gpui::transparent_black(), Edges::all(px(1.0)), hsla(color), BorderStyle::Dashed));
         }
         layout::AtomDraw::Asset { .. } | layout::AtomDraw::EmptyBox { .. } => {}
     }

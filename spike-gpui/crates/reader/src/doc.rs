@@ -269,21 +269,33 @@ impl Document {
     /// mount anything, and keeps at most the cache limit of parsed chunks alive.
     pub fn text_between(&self, a: DocPos, b: DocPos) -> String {
         let (a, b) = if a <= b { (a, b) } else { (b, a) };
-        let mut out = String::new();
-        for ci in a.chunk..=b.chunk {
-            if ci as usize >= self.chunks.len() {
-                break;
-            }
-            let c = self.chunk(ci as usize);
-            let from = if ci == a.chunk { (a.offset as usize).min(c.text.len()) } else { 0 };
-            let to = if ci == b.chunk { (b.offset as usize).min(c.text.len()) } else { c.text.len() };
-            if from >= to {
-                continue;
-            }
+        let last = (b.chunk as usize).min(self.chunks.len().saturating_sub(1));
+        // Chunks not in the cache are parsed in parallel, without colours, and not cached: a
+        // selection over the whole file must not disturb the view or hold every chunk.
+        let parts: Vec<String> = (a.chunk as usize..=last)
+            .into_par_iter()
+            .map(|ci| {
+                let holder;
+                let text: &str = match self.cached(ci) {
+                    Some(c) => {
+                        holder = c;
+                        &holder.text
+                    }
+                    None => {
+                        let parsed = self.parse_chunk(ci, false);
+                        return slice_part(&parsed.text, ci as u32, a, b);
+                    }
+                };
+                slice_part(text, ci as u32, a, b)
+            })
+            .collect();
+        let total: usize = parts.iter().map(|p| p.len() + SEP_BLOCK.len()).sum();
+        let mut out = String::with_capacity(total);
+        for p in parts.iter().filter(|p| !p.is_empty()) {
             if !out.is_empty() {
                 out.push_str(SEP_BLOCK);
             }
-            out.push_str(c.text.get(from..to).unwrap_or(""));
+            out.push_str(p);
         }
         out
     }
@@ -303,6 +315,15 @@ impl Document {
         let c = self.chunk(i);
         c.anchors.iter().find(|a| a.id == h.id).map(|a| (i, a.offset))
     }
+}
+
+fn slice_part(text: &str, ci: u32, a: DocPos, b: DocPos) -> String {
+    let from = if ci == a.chunk { (a.offset as usize).min(text.len()) } else { 0 };
+    let to = if ci == b.chunk { (b.offset as usize).min(text.len()) } else { text.len() };
+    if from >= to {
+        return String::new();
+    }
+    text.get(from..to).unwrap_or("").to_string()
 }
 
 fn colour_chunk(c: &mut ChunkContent) {

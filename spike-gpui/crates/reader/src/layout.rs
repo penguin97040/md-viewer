@@ -310,7 +310,8 @@ impl ChunkLayout {
         let mut best: Option<(usize, &Line)> = None;
         for (li, layer) in self.layers.iter().enumerate() {
             for b in &layer.boxes {
-                if !b.selectable || offset < b.byte0 || offset > b.byte1 {
+                // A box with no text (an image alone) shares its offset with what follows it.
+                if !b.selectable || b.byte0 == b.byte1 || offset < b.byte0 || offset > b.byte1 {
                     continue;
                 }
                 for l in &b.lines {
@@ -327,7 +328,7 @@ impl ChunkLayout {
         best.or_else(|| {
             let mut next: Option<(u32, usize, &Line)> = None;
             for (li, layer) in self.layers.iter().enumerate() {
-                for b in layer.boxes.iter().filter(|b| b.selectable && b.byte0 >= offset) {
+                for b in layer.boxes.iter().filter(|b| b.selectable && b.byte0 != b.byte1 && b.byte0 >= offset) {
                     if next.is_none_or(|n| b.byte0 < n.0) {
                         if let Some(l) = b.lines.first() {
                             next = Some((b.byte0, li, l));
@@ -343,7 +344,7 @@ impl ChunkLayout {
     pub fn text_at_y(&self, y: f32) -> Option<(u32, f32)> {
         let mut best: Option<(u32, f32)> = None;
         for layer in &self.layers {
-            for b in layer.boxes.iter().filter(|b| b.selectable) {
+            for b in layer.boxes.iter().filter(|b| b.selectable && b.byte0 != b.byte1) {
                 for l in &b.lines {
                     if l.top + l.height > y && best.is_none_or(|n| l.top < n.1 || (l.top == n.1 && l.byte0 < n.0)) {
                         best = Some((l.byte0, l.top));
@@ -465,6 +466,8 @@ pub struct Layouter<'a> {
     y: f32,
     pending: f32,
     glyph_buf: Vec<RawGlyph>,
+    /// Where text has reached in the flat text: an image has no text of its own to say.
+    text_at: std::cell::Cell<u32>,
 }
 
 /// Lays out one chunk. `first` and `last` say whether it starts or ends the document, which is
@@ -482,6 +485,7 @@ pub fn layout_chunk(c: &ChunkContent, o: &Options, st: &ChunkState, first: bool,
         y: 0.0,
         pending: 0.0,
         glyph_buf: Vec::new(),
+        text_at: std::cell::Cell::new(0),
     };
     let ctx = Ctx {
         family: if o.serif { Family::Serif } else { Family::Sans },
@@ -545,9 +549,10 @@ impl Layouter<'_> {
         };
         match b {
             Block::Heading { level, content, .. } => self.heading(*level, content, ctx, no_top, no_bottom),
-            Block::Paragraph { content, tight, .. } => {
+            Block::Paragraph { content, tight, span } => {
                 self.flush();
-                let (tb, h) = self.inline_box(content, None, ctx, self.o.wrap || true);
+                self.text_at.set(span.text.start);
+                let (tb, h) = self.inline_box(content, None, ctx, true);
                 self.push_box(tb);
                 self.y += h;
                 if !*tight {
@@ -680,8 +685,9 @@ impl Layouter<'_> {
             let check_inset = if checkbox_list && item.checked.is_some() { (13.0 - 0.8 * ctx.size).max(0.0) } else { 0.0 };
             for (bi, b) in item.blocks.iter().enumerate() {
                 match b {
-                    Block::Paragraph { content, tight, .. } => {
+                    Block::Paragraph { content, tight, span } => {
                         self.flush();
+                        self.text_at.set(span.text.start);
                         let first_line_inset = if bi == 0 { check_inset } else { 0.0 };
                         let mut c2 = inner;
                         c2.x += first_line_inset;
@@ -758,15 +764,16 @@ impl Layouter<'_> {
 
     fn checkbox(&mut self, x: f32, y: f32, on: bool) {
         let rect = Rect::new(x, y, 13.0, 13.0);
+        // goldmark marks task boxes `disabled`, so they take the browser's disabled colours. The
+        // light values are sampled from docs/screenshots/light.png; no reference shows dark ones.
+        let dark = self.o.mode == Mode::Dark;
         if on {
-            // style.css sets no `accent-color` on document checkboxes, so they keep the browser's
-            // own defaults for `color-scheme`.
-            let (fill, tick) = if self.o.mode == Mode::Dark { (0x99c8ff, 0x000000) } else { (0x0075ff, 0xffffff) };
+            let (fill, tick) = if dark { (0x4b4b4b, 0x000000) } else { (0xd2d2d2, 0xffffff) };
             self.rect(RectItem { rect, fill: Some(fill), border: None, radius: 2.0 });
             self.out.layers[self.layer].polys.extend(check_mark(x, y, 13.0, tick));
         } else {
-            let border = if self.o.mode == Mode::Dark { 0x858585 } else { 0x767676 };
-            self.rect(RectItem { rect, fill: Some(self.p.bg), border: Some(Border::all(border, 1.0)), radius: 2.0 });
+            let (fill, border) = if dark { (0x1e1e1e, 0x4b4b4b) } else { (0xf8f8f8, 0xd2d2d2) };
+            self.rect(RectItem { rect, fill: Some(fill), border: Some(Border::all(border, 1.0)), radius: 2.0 });
         }
     }
 
@@ -890,15 +897,21 @@ impl Layouter<'_> {
         self.flatten(content, RunStyle::from_ctx(ctx), &mut runs);
         self.shape_runs(&runs, &mut p);
         p.byte0 = runs.first().map_or(self.c.text.len() as u32, |r| r.start());
-        p.byte1 = runs.iter().rev().find_map(|r| r.end()).unwrap_or(p.byte0);
+        p.byte1 = runs.iter().rev().find_map(|r| r.end()).unwrap_or(p.byte0).max(p.byte0);
         p
     }
 
     fn flatten(&self, content: &[Inline], st: RunStyle, out: &mut Vec<Run>) {
         for i in content {
             match i {
-                Inline::Text(s) => out.push(Run::Text(*s, st)),
-                Inline::Code(s) => out.push(Run::Text(*s, code_style(st, self.p))),
+                Inline::Text(s) => {
+                    self.text_at.set(s.end);
+                    out.push(Run::Text(*s, st));
+                }
+                Inline::Code(s) => {
+                    self.text_at.set(s.end);
+                    out.push(Run::Text(*s, code_style(st, self.p)));
+                }
                 Inline::Break => out.push(Run::Break),
                 Inline::Styled { style, content } => {
                     let mut n = st;
@@ -988,7 +1001,7 @@ impl Layouter<'_> {
                 Some(a) => out.push(Run::Text(a, n)),
                 None => {
                     let (w, h) = (n.size * 2.0, n.size * 1.4);
-                    out.push(Run::Atom(AtomDraw::EmptyBox { w, h }, h, 0.0, img.alt_text.map_or(0, |a| a.start)));
+                    out.push(Run::Atom(AtomDraw::EmptyBox { w, h }, h, 0.0, img.alt_text.map_or(self.text_at.get(), |a| a.start)));
                 }
             }
         };
@@ -998,14 +1011,26 @@ impl Layouter<'_> {
                 // follows the image's own proportions.
                 let w = img.width.unwrap_or(width).min(st.max_w).max(1.0);
                 let h = if width > 0.0 { w * height / width } else { height };
-                out.push(Run::Atom(AtomDraw::Image { key, w, h }, h, 0.0, st.offset_hint));
+                out.push(Run::Atom(AtomDraw::Image { key, w, h }, h, 0.0, self.text_at.get()));
             }
             ImageState::Pending if !matches!(img.source, ImageSource::Web(_)) => {
                 // Reserve what is known: the attributes, or nothing yet.
                 let w = img.width.unwrap_or(1.0).min(st.max_w);
                 let h = img.height.unwrap_or(1.0);
-                out.push(Run::Atom(AtomDraw::EmptyBox { w: 0.0, h: 0.0 }, h, 0.0, st.offset_hint));
+                out.push(Run::Atom(AtomDraw::EmptyBox { w: 0.0, h: 0.0 }, h, 0.0, self.text_at.get()));
                 let _ = w;
+            }
+            ImageState::Failed if !matches!(img.source, ImageSource::Web(_)) && !img.alt.is_empty() => {
+                // A browser shows a broken-image icon and the alt text. Here: the alt text in
+                // the held image's box. It is a label, not document text.
+                let mut n = st;
+                n.size = st.size * 0.85;
+                n.color = self.p.muted;
+                n.decor = Decor::HeldImage;
+                n.pad_l = 7.0;
+                n.pad_r = 7.0;
+                n.link = None;
+                out.push(Run::Label(img.alt.clone(), n, self.text_at.get()));
             }
             _ => held(self, out),
         }
@@ -1031,11 +1056,34 @@ impl Layouter<'_> {
                     let span = p.spans.len() as u32;
                     let font = FontSpec { family: Family::Sans, bold: false, italic: false };
                     let _ = font;
-                    p.spans.push(SpanInfo { ascent: *up, descent: *down, line_height: up + down, size: *up, color: self.p.text, ..Default::default() });
+                    p.spans.push(SpanInfo { ascent: *up, descent: *down, line_height: up + down, size: *up, color: self.p.border, ..Default::default() });
                     let id = p.atoms.len() as u32;
                     p.atoms.push(draw.clone());
                     p.glyphs.push(Glyph { x0: cursor, x1: cursor + w, byte: *offset, id, font: 0, span, flags: FLAG_ATOM });
                     cursor += w;
+                    i += 1;
+                }
+                Run::Label(text, st, offset) => {
+                    let font = st.font();
+                    let (ascent, descent) = self.shaper.metrics(font, st.size);
+                    let mut span = st.span_info(ascent, descent, None);
+                    span.chrome = true;
+                    let id = p.spans.len() as u32;
+                    p.spans.push(span);
+                    self.glyph_buf.clear();
+                    let width = self.shaper.shape(text, font, st.size, &mut self.glyph_buf);
+                    let start = cursor + st.pad_l;
+                    let n = self.glyph_buf.len();
+                    for k in 0..n {
+                        let g = self.glyph_buf[k];
+                        let next = if k + 1 < n { self.glyph_buf[k + 1].x } else { width };
+                        let mut flags = if g.emoji { FLAG_EMOJI } else { 0 };
+                        if text.as_bytes().get(g.byte as usize) == Some(&b' ') {
+                            flags |= FLAG_SPACE;
+                        }
+                        p.glyphs.push(Glyph { x0: start + g.x, x1: start + next, byte: *offset, id: g.id, font: g.font, span: id, flags });
+                    }
+                    cursor = start + width + st.pad_r;
                     i += 1;
                 }
                 Run::Text(s0, st0) => {
@@ -1371,8 +1419,7 @@ impl Layouter<'_> {
         let done = self.st.copied == Some(key);
         let color = if done { self.p.accent } else { self.p.muted };
         let label = if done { "COPIED" } else { "COPY" };
-        let family = if self.o.serif { Family::Serif } else { Family::Sans };
-        let font = FontSpec { family, bold: false, italic: false };
+        let font = FontSpec { family: Family::Mono, bold: false, italic: false };
         let size = self.o.font_size;
         let t = self.chrome_text(label, font, size, color, 0.0, 0.0);
         let w = 8.0 + 15.0 + 6.0 + t.2 + 8.0 + 2.0;
@@ -1418,7 +1465,11 @@ impl Layouter<'_> {
         let body = &self.c.text[text.range()];
         let mut tok_i = 0usize;
         let mut pos = text.start;
-        let mut space_w = None;
+        // The width of a space, from a run where it is not trailing: GPUI's shaper gives a run of
+        // only spaces little or no width.
+        self.glyph_buf.clear();
+        self.shaper.shape(" x", font, c.size, &mut self.glyph_buf);
+        let space_w = self.glyph_buf.get(1).map_or(c.size * 0.5, |g| g.x);
         for line in body.split('\n') {
             let line_start = pos;
             let line_end = line_start + line.len() as u32;
@@ -1478,15 +1529,22 @@ impl Layouter<'_> {
                 let stretch = &self.c.text[at as usize..end as usize];
                 self.glyph_buf.clear();
                 let has_tab = stretch.contains('\t');
-                let width = if has_tab {
+                let shaped_w = if has_tab {
                     let replaced = stretch.replace('\t', " ");
                     self.shaper.shape(&replaced, spec, c.size, &mut self.glyph_buf)
                 } else {
                     self.shaper.shape(stretch, spec, c.size, &mut self.glyph_buf)
                 };
+                let n = self.glyph_buf.len();
+                let bytes = self.c.text.as_bytes();
+                let is_blank = |b: u32| matches!(bytes.get((at + b) as usize), Some(b' ' | b'\t'));
+                // Trailing white space must still advance, for the next stretch to land right.
+                let width = match self.glyph_buf.last() {
+                    Some(g) if is_blank(g.byte) => shaped_w.max(g.x + space_w),
+                    _ => shaped_w,
+                };
                 let fake = spec.bold && self.shaper.fake_bold(spec);
                 let mut extra = 0.0f32;
-                let n = self.glyph_buf.len();
                 let mut si = 0usize;
                 for k in 0..n {
                     let g = self.glyph_buf[k];
@@ -1495,13 +1553,12 @@ impl Layouter<'_> {
                         si += 1;
                     }
                     let next = if k + 1 < n { self.glyph_buf[k + 1].x } else { width };
-                    let is_tab = self.c.text.as_bytes()[byte as usize] == b'\t';
+                    let is_tab = bytes[byte as usize] == b'\t';
+                    let x0 = cursor + g.x + extra;
                     let mut x1 = cursor + next + extra;
                     if is_tab {
                         // `tab-size: 4`: to the next stop of four space widths.
-                        let sw = *space_w.get_or_insert(next - g.x);
-                        let stop = sw * 4.0;
-                        let x0 = cursor + g.x + extra;
+                        let stop = space_w * 4.0;
                         let target = ((x0 + 0.01) / stop).floor() * stop + stop;
                         extra += target - x1;
                         x1 = target;
@@ -1513,10 +1570,10 @@ impl Layouter<'_> {
                     if fake {
                         flags |= FLAG_FAKE_BOLD;
                     }
-                    if is_tab || self.c.text.as_bytes()[byte as usize] == b' ' {
+                    if is_tab || bytes[byte as usize] == b' ' {
                         flags |= FLAG_SPACE;
                     }
-                    p.glyphs.push(Glyph { x0: cursor + g.x + if is_tab { extra - (x1 - (cursor + next + extra - (x1 - (cursor + next + extra)))) * 0.0 } else { extra }, x1, byte, id: g.id, font: g.font, span: spans_here[si].1, flags });
+                    p.glyphs.push(Glyph { x0, x1, byte, id: g.id, font: g.font, span: spans_here[si].1, flags });
                 }
                 cursor += width + extra;
                 at = end;
@@ -1850,7 +1907,6 @@ struct RunStyle {
     lh_px: f32,
     lh_ratio: f32,
     max_w: f32,
-    offset_hint: u32,
 }
 
 impl RunStyle {
@@ -1871,7 +1927,6 @@ impl RunStyle {
             lh_px: c.size * c.lh,
             lh_ratio: c.lh,
             max_w: c.w,
-            offset_hint: 0,
         }
     }
 
@@ -1914,6 +1969,8 @@ enum Run {
     Text(ByteSpan, RunStyle),
     /// (what to draw, height above the baseline, depth below it, text offset)
     Atom(AtomDraw, f32, f32, u32),
+    /// Text that is shown but is not document text, at this flat text offset.
+    Label(String, RunStyle, u32),
     Break,
 }
 
@@ -1921,7 +1978,7 @@ impl Run {
     fn start(&self) -> u32 {
         match self {
             Run::Text(s, _) => s.start,
-            Run::Atom(_, _, _, o) => *o,
+            Run::Atom(_, _, _, o) | Run::Label(_, _, o) => *o,
             Run::Break => u32::MAX,
         }
     }
@@ -1954,6 +2011,9 @@ pub struct LineRange {
     byte0: u32,
     byte1: u32,
 }
+
+/// Float noise must not wrap a table cell sized to exactly fit its own text.
+const FIT_SLACK: f32 = 0.05;
 
 fn seg_end_x(p: &Prepared, r: &std::ops::Range<usize>, upto: usize) -> f32 {
     // The end of the last glyph that is not trailing white space.
@@ -2010,7 +2070,7 @@ pub fn break_lines(p: &Prepared, width: Option<f32>, c: &ChunkContent, _prefer_w
         };
         // Whole segment fits: the common case, without computing break opportunities.
         let x0 = p.glyphs[seg.start].x0;
-        if seg_end_x(p, seg, seg.end) - x0 <= limit {
+        if seg_end_x(p, seg, seg.end) - x0 <= limit + FIT_SLACK {
             emit(&mut out, seg.start, seg.end, seg_b1);
             if let Some(l) = out.last_mut() {
                 l.byte0 = seg_b0;
@@ -2055,7 +2115,7 @@ pub fn break_lines(p: &Prepared, width: Option<f32>, c: &ChunkContent, _prefer_w
                     bi += 1;
                     continue;
                 }
-                if seg_end_x(p, &(start..b), b) - lx <= limit {
+                if seg_end_x(p, &(start..b), b) - lx <= limit + FIT_SLACK {
                     fit = Some(b);
                     bi += 1;
                 } else {
@@ -2311,6 +2371,10 @@ mod tests {
 
     #[test]
     fn code_tabs_go_to_stops_of_four() {
+        let (_, tab_first) = lay("```go\n\tb\n```\n", OPTS);
+        let cw0 = 20.0 * 0.87 * 0.5;
+        let g = boxes(&tab_first)[0].glyphs.last().unwrap().x0;
+        assert!((g - 4.0 * cw0).abs() < 0.01, "a leading tab goes to the first stop: {g}");
         let (_, l) = lay("```\na\tb\n```\n", OPTS);
         let b = boxes(&l)[0];
         let cw = 20.0 * 0.87 * 0.5;
@@ -2431,5 +2495,66 @@ mod tests {
         let (_, l) = lay("```\na\n\nb\n```\n", OPTS);
         assert_eq!(boxes(&l)[0].lines.len(), 3);
         assert!(boxes(&l)[0].lines[1].height > 0.0);
+    }
+}
+
+#[cfg(test)]
+mod image_box_tests {
+    use super::link_tests::Fake;
+    use super::*;
+    use crate::parse::parse_whole;
+
+    struct Big;
+    impl Assets for Big {
+        fn image(&self, _s: &ImageSource) -> ImageState {
+            ImageState::Ready { width: 400.0, height: 400.0, key: 1 }
+        }
+    }
+
+    /// An image alone has no text: a jump to the heading after it must land on the heading.
+    #[test]
+    fn offsets_after_an_image_find_the_text() {
+        let o = Options { width: 800.0, padding: 20.0, font_size: 20.0, line_height: 1.5, serif: false, wrap: true, mode: Mode::Dark };
+        let w = parse_whole("One\n\n![a](x.png)\n\n## Next\n", 1 << 30, false);
+        let c = &w.chunks[0];
+        let l = layout_chunk(c, &o, &ChunkState::default(), true, true, &mut Fake, &Big);
+        let next = c.anchors.iter().find(|a| a.id == "next").unwrap().offset;
+        assert!(l.y_of(next).unwrap() > 400.0, "{:?}", l.y_of(next));
+        // At the top of the view inside the image, the anchor is the text below it.
+        let (byte, top) = l.text_at_y(200.0).unwrap();
+        assert_eq!(byte, next);
+        assert!(top > 400.0);
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+    use crate::parse::parse_whole;
+
+    pub struct Fake;
+    impl Shaper for Fake {
+        fn shape(&mut self, text: &str, _f: FontSpec, size: f32, out: &mut Vec<RawGlyph>) -> f32 {
+            let mut x = 0.0;
+            for (i, _) in text.char_indices() {
+                out.push(RawGlyph { x, byte: i as u32, id: 1, font: 1, emoji: false });
+                x += size * 0.5;
+            }
+            x
+        }
+        fn metrics(&mut self, _f: FontSpec, size: f32) -> (f32, f32) {
+            ((size * 0.8).round(), (size * 0.2).round())
+        }
+    }
+
+    #[test]
+    fn footnote_markers_and_arrows_are_links() {
+        let o = Options { width: 800.0, padding: 20.0, font_size: 20.0, line_height: 1.5, serif: false, wrap: true, mode: Mode::Dark };
+        let w = parse_whole("See[^a] and [x](#t).\n\n[^a]: Note.\n", 1 << 30, false);
+        let c = &w.chunks[0];
+        let l = layout_chunk(c, &o, &ChunkState::default(), true, true, &mut Fake, &NoAssets);
+        let targets: Vec<String> = l.hits.iter().filter_map(|h| if let HitKind::Link(i) = h.kind { Some(format!("{:?}", l.links[i as usize])) } else { None }).collect();
+        assert!(targets.iter().any(|t| t.contains("fn:1")), "{targets:?} {:?}", l.links);
+        assert!(targets.iter().any(|t| t.contains("fnref:1")), "{targets:?}");
     }
 }

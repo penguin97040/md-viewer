@@ -43,6 +43,18 @@ async fn next_frame(this: &WeakEntity<ReaderView>, cx: &mut AsyncApp, limit_ms: 
     }
 }
 
+/// Stands in for the content crate: every asset arrives with a size unlike its placeholder.
+struct FakeAssets;
+impl crate::layout::Assets for FakeAssets {
+    fn math(&self, src: &str, display: bool, font_size: f32) -> Option<crate::layout::AssetBox> {
+        let h = if display { font_size * 3.0 } else { font_size * 1.4 };
+        Some(crate::layout::AssetBox { width: src.len() as f32 * font_size * 0.6, height: h, baseline: h * 0.75, key: 1 })
+    }
+    fn mermaid(&self, _src: &str) -> Option<crate::layout::AssetBox> {
+        Some(crate::layout::AssetBox { width: 600.0, height: 320.0, baseline: 320.0, key: 2 })
+    }
+}
+
 pub fn start(view: Entity<ReaderView>, cx: &mut gpui::App) {
     let Ok(path) = std::env::var("MDV_SCRIPT") else { return };
     let results = std::env::var("MDV_RESULTS").unwrap_or_else(|_| "/dev/stderr".into());
@@ -91,6 +103,7 @@ pub fn start(view: Entity<ReaderView>, cx: &mut gpui::App) {
                         v.perf.interval_ms.clear();
                         v.perf.layout_ms.clear();
                         v.perf.mounts = 0;
+                        v.perf.reset_interval();
                     });
                 }
                 // scroll DY COUNT DELAY_MS
@@ -143,9 +156,7 @@ pub fn start(view: Entity<ReaderView>, cx: &mut gpui::App) {
                     let t = Instant::now();
                     let _ = this.update(cx, |v, cx| {
                         let total = v.total_height();
-                        v.anchor = (0, 0.0);
-                        let y = total * num(0) as f64;
-                        v.scroll_by(y.min(1e9) as f32);
+                        v.set_scroll_y(total * num(0) as f64);
                         cx.notify();
                     });
                     next_frame(&this, cx, 3000).await;
@@ -226,6 +237,35 @@ pub fn start(view: Entity<ReaderView>, cx: &mut gpui::App) {
                         format!("{rest}: selection text {} bytes in {e:.1} ms; start {start:?} end {end:?}; mounted={}", x.len(), v.mounted_chunks())
                     });
                     log(&mut out, &s.unwrap_or_default());
+                }
+                // What the system clipboard holds, read back through GPUI.
+                "clip_info" => {
+                    let t = this.update(cx, |_, cx| cx.read_from_clipboard().and_then(|c| c.text())).ok().flatten().unwrap_or_default();
+                    let start: String = t.chars().take(40).collect();
+                    let end: String = t.chars().rev().take(30).collect::<Vec<_>>().into_iter().rev().collect();
+                    let sections = t.lines().filter(|l| l.starts_with("Section ")).count();
+                    log(&mut out, &format!("{rest}: clipboard {} bytes, {sections} Section lines; start {start:?} end {end:?}", t.len()));
+                }
+                "fake_assets" => {
+                    let _ = this.update(cx, |v, cx| {
+                        v.set_assets(Some(std::sync::Arc::new(FakeAssets)));
+                        cx.notify();
+                    });
+                    next_frame(&this, cx, 2000).await;
+                }
+                // Clicks the first visible link whose target contains the text, with real input.
+                "click_link" => {
+                    let at = this.update(cx, |v, _| v.link_point(rest)).ok().flatten();
+                    match (at, &shot) {
+                        (Some((x, y)), Some(c)) => {
+                            let _ = std::process::Command::new("bash").arg(c).arg(format!("click:{x}:{y}")).status();
+                        }
+                        _ => {
+                            let seen = this.update(cx, |v, _| v.visible.iter().map(|x| format!("y={} {:?}", x.y, x.layout.hits.iter().filter_map(|h| if let crate::layout::HitKind::Link(i) = h.kind { Some((i, h.rect.y, h.rect.w)) } else { None }).collect::<Vec<_>>())).collect::<Vec<_>>()).unwrap_or_default();
+                            log(&mut out, &format!("no visible link to {rest}: {seen:?}"));
+                        }
+                    }
+                    cx.background_executor().timer(Duration::from_millis(300)).await;
                 }
                 "shot" => {
                     if let Some(c) = &shot {
