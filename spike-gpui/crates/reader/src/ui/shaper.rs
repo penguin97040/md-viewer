@@ -63,8 +63,7 @@ impl Shaper for GpuiShaper {
                 out.push(RawGlyph { x: f32::from(g.position.x), byte: g.index as u32, id: g.id.0, font: r.font_id.0 as u32, emoji: g.is_emoji });
             }
         }
-        // Fallback runs can arrive out of byte order only for right-to-left text, which this
-        // reader does not lay out. The sort keeps line breaking sound if it happens.
+        // Right-to-left text is not reordered by this reader's line breaking: it is a known gap.
         f32::from(l.width)
     }
 

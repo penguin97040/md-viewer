@@ -552,7 +552,7 @@ impl Layouter<'_> {
             Block::Paragraph { content, tight, span } => {
                 self.flush();
                 self.text_at.set(span.text.start);
-                let (tb, h) = self.inline_box(content, None, ctx, true);
+                let (tb, h) = self.inline_box(content, ctx, true);
                 self.push_box(tb);
                 self.y += h;
                 if !*tight {
@@ -597,7 +597,7 @@ impl Layouter<'_> {
                     let mut term = ctx;
                     term.bold = true;
                     if !item.term.is_empty() {
-                        let (tb, h) = self.inline_box(&item.term, None, term, true);
+                        let (tb, h) = self.inline_box(&item.term, term, true);
                         self.push_box(tb);
                         self.y += h;
                     }
@@ -692,7 +692,7 @@ impl Layouter<'_> {
                         let mut c2 = inner;
                         c2.x += first_line_inset;
                         c2.w -= first_line_inset;
-                        let (tb, h) = self.inline_box(content, None, c2, true);
+                        let (tb, h) = self.inline_box(content, c2, true);
                         self.push_box(tb);
                         self.y += h;
                         if !*tight {
@@ -800,7 +800,7 @@ impl Layouter<'_> {
                 match b {
                     Block::Paragraph { content, .. } => {
                         self.flush();
-                        let (tb, h) = self.inline_box(content, None, inner, true);
+                        let (tb, h) = self.inline_box(content, inner, true);
                         self.push_box(tb);
                         self.y += h;
                         self.margin(0.5 * c.size);
@@ -844,7 +844,7 @@ impl Layouter<'_> {
             self.push_chrome(t, sum.x, baseline);
             (None, line_h)
         } else {
-            let (tb, h) = self.inline_box(&d.summary, None, sum, true);
+            let (tb, h) = self.inline_box(&d.summary, sum, true);
             (Some(tb), h)
         };
         // The disclosure triangle, drawn in the marker's column.
@@ -882,9 +882,9 @@ impl Layouter<'_> {
         self.out.layers[self.layer].boxes.push(tb);
     }
 
-    fn inline_box(&mut self, content: &[Inline], _unused: Option<()>, ctx: Ctx, wrap: bool) -> (TextBox, f32) {
+    fn inline_box(&mut self, content: &[Inline], ctx: Ctx, wrap: bool) -> (TextBox, f32) {
         let prep = self.prepare(content, ctx);
-        let lines = break_lines(&prep, if wrap { Some(ctx.w) } else { None }, self.c, true);
+        let lines = break_lines(&prep, if wrap { Some(ctx.w) } else { None }, self.c);
         self.place(prep, &lines, ctx, ctx.x, self.y, ctx.w, true)
     }
 
@@ -1583,7 +1583,7 @@ impl Layouter<'_> {
             pos = line_end + 1;
         }
         p.total = 0.0;
-        let lines = break_lines(&p, wrap, self.c, false);
+        let lines = break_lines(&p, wrap, self.c);
         let mut cc = c;
         cc.align = align;
         let (mut tb, h) = self.place(p, &lines, cc, c.x, self.y, c.w, true);
@@ -1622,8 +1622,6 @@ impl Layouter<'_> {
         };
         struct Cell {
             prep: Prepared,
-            min: f32,
-            max: f32,
             ctx: Ctx,
         }
         // Prepare every cell and find each column's minimum and maximum widths.
@@ -1661,7 +1659,7 @@ impl Layouter<'_> {
                 let (mn, mx) = cell_widths(&prep, wrap);
                 min_w[col] = min_w[col].max(mn);
                 max_w[col] = max_w[col].max(mx);
-                cells.push(Some(Cell { prep, min: mn, max: mx, ctx: c }));
+                cells.push(Some(Cell { prep, ctx: c }));
             }
             grid.push(cells);
         }
@@ -1695,7 +1693,7 @@ impl Layouter<'_> {
             for (col, cell) in row.into_iter().enumerate() {
                 let cell = cell.expect("cell");
                 let inner = (widths[col] - extra).max(1.0);
-                let lines = break_lines(&cell.prep, if wrap { Some(inner) } else { None }, self.c, true);
+                let lines = break_lines(&cell.prep, if wrap { Some(inner) } else { None }, self.c);
                 let mut h = 0.0;
                 {
                     let (sa, sd, sl) = cell.prep.strut;
@@ -1722,7 +1720,6 @@ impl Layouter<'_> {
                 }
                 row_h = row_h.max(h);
                 placed.push((cell, lines, h, inner));
-                let _ = (placed.last().map(|p: &(Cell, Vec<LineRange>, f32, f32)| p.0.min), placed.last().map(|p: &(Cell, Vec<LineRange>, f32, f32)| p.0.max));
             }
             let full_row = row_h + 2.0 * pad_y + 1.0;
             let is_head = ri < head_rows;
@@ -2024,9 +2021,10 @@ fn seg_end_x(p: &Prepared, r: &std::ops::Range<usize>, upto: usize) -> f32 {
     if k > r.start { p.glyphs[k - 1].x1 } else { 0.0 }
 }
 
-/// Breaks prepared text into lines. `prefer_words` applies `overflow-wrap: break-word` only as a
-/// last resort; `false` is code's `anywhere`, which has the same greedy effect here.
-pub fn break_lines(p: &Prepared, width: Option<f32>, c: &ChunkContent, _prefer_words: bool) -> Vec<LineRange> {
+/// Breaks prepared text into lines. A word too long for the line breaks anywhere, which is what
+/// both `overflow-wrap: break-word` and `anywhere` do once placed. `anywhere` also shrinks a table
+/// cell's minimum width, which `cell_widths` handles.
+pub fn break_lines(p: &Prepared, width: Option<f32>, c: &ChunkContent) -> Vec<LineRange> {
     let mut out = Vec::new();
     for (si, seg) in p.segments.iter().enumerate() {
         let fallback = p.seg_bytes.get(si).copied();
@@ -2153,7 +2151,7 @@ pub fn break_lines(p: &Prepared, width: Option<f32>, c: &ChunkContent, _prefer_w
 
 /// `text-wrap: balance`: the narrowest width that keeps the same number of lines.
 fn balance(p: &Prepared, width: f32, c: &ChunkContent) -> Vec<LineRange> {
-    let normal = break_lines(p, Some(width), c, true);
+    let normal = break_lines(p, Some(width), c);
     if normal.len() < 2 || normal.len() > 6 {
         return normal;
     }
@@ -2165,7 +2163,7 @@ fn balance(p: &Prepared, width: f32, c: &ChunkContent) -> Vec<LineRange> {
             break;
         }
         let mid = (lo + hi) / 2.0;
-        let t = break_lines(p, Some(mid), c, true);
+        let t = break_lines(p, Some(mid), c);
         if t.len() <= n {
             hi = mid;
             best = t;

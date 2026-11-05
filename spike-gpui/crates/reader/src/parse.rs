@@ -141,7 +141,6 @@ pub fn parse_whole(src: &str, target: usize, colours: bool) -> WholeParse {
     let mut out = Vec::new();
     b.run(parser.into_offset_iter(), Some((target, &mut out)));
     let (last, headings) = b.finish_chunk();
-    let cut = out.last().map_or(0, |(_, e): &(ChunkContent, u32)| *e);
     out.push((last, src.len() as u32));
     let mut ranges = Vec::with_capacity(out.len());
     let mut chunks = Vec::with_capacity(out.len());
@@ -151,7 +150,6 @@ pub fn parse_whole(src: &str, target: usize, colours: bool) -> WholeParse {
         start = end;
         chunks.push(c);
     }
-    let _ = cut;
     WholeParse { chunks, ranges, headings }
 }
 
@@ -1047,9 +1045,6 @@ impl<'a, 's> Builder<'a, 's> {
     fn note_ref(&mut self, label: &str, src: u32) {
         self.ensure_inline(src);
         self.flush_text();
-        if !self.defs_contains(label) && !self.note_numbers.contains_key(label) {
-            // A definition can come later in the source; numbering does not depend on that.
-        }
         let next = self.note_order.len() as u32 + 1;
         let e = self.note_numbers.entry(label.to_string()).or_insert((next, 0));
         let (number, uses) = *e;
@@ -1062,10 +1057,6 @@ impl<'a, 's> Builder<'a, 's> {
         let label_span = self.push_no_find(&number.to_string());
         self.anchors.push(Anchor { id: id.clone(), offset: t });
         self.add_inline(Inline::FootnoteRef { id, target: format!("fn:{number}"), label: label_span });
-    }
-
-    fn defs_contains(&self, label: &str) -> bool {
-        self.defs.contains_key(label)
     }
 
     /// Writes footnotes at the end of the chunk and hands back the finished content.
