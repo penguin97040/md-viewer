@@ -940,7 +940,16 @@ impl DirectXResources {
 }
 
 impl DirectXRenderPipelines {
+    /// Spike patch: times the build for `MDV_TIMING`, so the log shows what a window costs now
+    /// that the bytecode is shared (see `shader_resources::RawShaderBytes`).
     pub fn new(device: &ID3D11Device) -> Result<Self> {
+        let started = std::time::Instant::now();
+        let built = Self::build(device);
+        spike_timing::record_pipelines(started.elapsed());
+        built
+    }
+
+    fn build(device: &ID3D11Device) -> Result<Self> {
         let shadow_pipeline = PipelineState::new(
             device,
             "shadow_pipeline",
@@ -1703,26 +1712,51 @@ pub(crate) mod spike_timing {
 
     static TOTAL_NANOS: AtomicU64 = AtomicU64::new(0);
 
+    static COMPILES: AtomicU64 = AtomicU64::new(0);
+
+    /// One line per renderer built: only the first window in a process should have compiled.
+    pub(crate) fn record_pipelines(took: Duration) {
+        let Some(path) = std::env::var_os("MDV_TIMING") else { return };
+        append(
+            &path,
+            &format!(
+                "pipelines_ms={:.2} compiles_so_far={}",
+                took.as_secs_f64() * 1000.0,
+                COMPILES.load(Ordering::Relaxed)
+            ),
+        );
+    }
+
     pub(crate) fn record_shader(entry: &str, took: Duration) {
         let Some(path) = std::env::var_os("MDV_TIMING") else { return };
+        COMPILES.fetch_add(1, Ordering::Relaxed);
         let total = TOTAL_NANOS.fetch_add(took.as_nanos() as u64, Ordering::Relaxed) + took.as_nanos() as u64;
+        append(
+            &path,
+            &format!(
+                "shader={} compile_ms={:.2} shader_total_ms={:.2}",
+                entry.trim_end_matches('\0'),
+                took.as_secs_f64() * 1000.0,
+                total as f64 / 1.0e6
+            ),
+        );
+    }
+
+    fn append(path: &std::ffi::OsStr, line: &str) {
         let epoch_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(
-                f,
-                "epoch_ms={epoch_ms:.1} shader={} compile_ms={:.2} shader_total_ms={:.2}",
-                entry.trim_end_matches('\0'),
-                took.as_secs_f64() * 1000.0,
-                total as f64 / 1.0e6
-            );
+            let _ = writeln!(f, "epoch_ms={epoch_ms:.1} {line}");
         }
     }
 }
 
 pub(crate) mod shader_resources {
+    use std::marker::PhantomData;
+    use std::sync::{Arc, Mutex};
+
     use anyhow::Result;
     use super::spike_timing;
 
@@ -1754,11 +1788,13 @@ pub(crate) mod shader_resources {
         Fragment,
     }
 
-    pub(crate) struct RawShaderBytes<'t> {
-        inner: &'t [u8],
+    /// Spike patch: compiled bytecode shared by the whole process. Pipelines are built per renderer
+    /// and so per window, and again after a lost device, but bytecode depends on neither.
+    static BYTECODE: Mutex<Vec<(ShaderModule, ShaderTarget, Arc<[u8]>)>> = Mutex::new(Vec::new());
 
-        #[cfg(all())]
-        _blob: ID3DBlob,
+    pub(crate) struct RawShaderBytes<'t> {
+        inner: Arc<[u8]>,
+        _borrow: PhantomData<&'t [u8]>,
     }
 
     impl<'t> RawShaderBytes<'t> {
@@ -1769,19 +1805,23 @@ pub(crate) mod shader_resources {
             }
             #[cfg(all())]
             {
-                let blob = build_shader_blob(module, target)?;
-                let inner = unsafe {
-                    std::slice::from_raw_parts(
-                        blob.GetBufferPointer() as *const u8,
-                        blob.GetBufferSize(),
-                    )
+                // Held across the compile, so a racing thread waits rather than compiling again.
+                let mut cache = BYTECODE.lock().unwrap_or_else(|e| e.into_inner());
+                let hit = cache.iter().find(|(m, t, _)| *m == module && *t == target);
+                let inner = match hit {
+                    Some((_, _, bytes)) => bytes.clone(),
+                    None => {
+                        let bytes = load_or_compile(module, target)?;
+                        cache.push((module, target, bytes.clone()));
+                        bytes
+                    }
                 };
-                Ok(Self { inner, _blob: blob })
+                Ok(Self { inner, _borrow: PhantomData })
             }
         }
 
         pub(crate) fn as_bytes(&'t self) -> &'t [u8] {
-            self.inner
+            &self.inner
         }
 
         #[cfg(any())]
@@ -1829,7 +1869,16 @@ pub(crate) mod shader_resources {
     }
 
     #[cfg(all())]
-    pub(super) fn build_shader_blob(entry: ShaderModule, target: ShaderTarget) -> Result<ID3DBlob> {
+    fn load_or_compile(module: ShaderModule, target: ShaderTarget) -> Result<Arc<[u8]>> {
+        let blob = build_shader_blob(module, target)?;
+        let bytes = unsafe {
+            std::slice::from_raw_parts(blob.GetBufferPointer() as *const u8, blob.GetBufferSize())
+        };
+        Ok(Arc::from(bytes))
+    }
+
+    #[cfg(all())]
+    fn build_shader_blob(entry: ShaderModule, target: ShaderTarget) -> Result<ID3DBlob> {
         unsafe {
             let shader_name = if matches!(entry, ShaderModule::EmojiRasterization) {
                 "color_text_raster.hlsl"
