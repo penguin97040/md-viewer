@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use gpui::RenderImage;
@@ -13,6 +14,18 @@ use crate::paths;
 
 const MAX_IMAGE_BYTES: u64 = 25 << 20;
 const MAX_IMAGE_SIDE: u32 = 16_384;
+/// Decoded size of one image. A small PNG can claim 16,384 x 16,384 pixels, which is 1 GB.
+const MAX_DECODED_BYTES: u64 = 400 << 20;
+/// Decoded images held across all tabs. Running out of memory aborts the process and so closes every
+/// window, which `catch_unwind` cannot contain; past this, images show as failed instead.
+const DECODED_BUDGET: u64 = 1 << 30;
+
+static DECODED: AtomicU64 = AtomicU64::new(0);
+
+/// Takes `need` bytes from `total`, unless that would pass the budget or the single-image limit.
+fn reserve(total: &AtomicU64, need: u64, budget: u64) -> bool {
+    need <= MAX_DECODED_BYTES && total.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |t| (t + need <= budget).then_some(t + need)).is_ok()
+}
 
 #[derive(Clone)]
 enum Entry {
@@ -27,11 +40,19 @@ pub struct ImageStore {
     entries: Arc<Mutex<HashMap<String, Entry>>>,
     finished: Arc<Mutex<u64>>,
     started: Mutex<Vec<String>>,
+    /// This store's share of `DECODED`, given back when the document closes.
+    decoded: Arc<AtomicU64>,
+}
+
+impl Drop for ImageStore {
+    fn drop(&mut self) {
+        DECODED.fetch_sub(self.decoded.load(Ordering::SeqCst), Ordering::SeqCst);
+    }
 }
 
 impl ImageStore {
     pub fn new(document: Option<PathBuf>) -> Self {
-        Self { document, entries: Arc::default(), finished: Arc::default(), started: Mutex::new(Vec::new()) }
+        Self { document, entries: Arc::default(), finished: Arc::default(), started: Mutex::new(Vec::new()), decoded: Arc::default() }
     }
 
     pub fn finished(&self) -> u64 {
@@ -55,8 +76,9 @@ impl ImageStore {
         let entries = self.entries.clone();
         let finished = self.finished.clone();
         let doc = self.document.clone();
+        let decoded = self.decoded.clone();
         std::thread::spawn(move || {
-            let entry = read_image(&id, doc.as_deref()).unwrap_or(Entry::Failed);
+            let entry = read_image(&id, doc.as_deref(), &decoded).unwrap_or(Entry::Failed);
             entries.lock().expect("lock").insert(id, entry);
             *finished.lock().expect("lock") += 1;
         });
@@ -88,7 +110,7 @@ impl Assets for ImageStore {
     }
 }
 
-fn read_image(id: &str, doc: Option<&Path>) -> Option<Entry> {
+fn read_image(id: &str, doc: Option<&Path>, decoded: &AtomicU64) -> Option<Entry> {
     let bytes = if let Some(href) = id.strip_prefix('L') {
         // The security check comes before anything can touch the file system.
         let path = paths::resolve(doc?, href).ok()?;
@@ -101,13 +123,35 @@ fn read_image(id: &str, doc: Option<&Path>) -> Option<Entry> {
         let d = id.strip_prefix('D')?;
         base64(d.split_once(',')?.1)?
     };
-    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?;
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format().ok()?;
+    // GPUI turns on every decoder the `image` crate has (TIFF, EXR, DDS and more). A document only
+    // gets the formats on the Go reader's list, so the others are not reachable from one.
+    use image::ImageFormat as F;
+    if !matches!(reader.format()?, F::Png | F::Jpeg | F::Gif | F::WebP | F::Bmp | F::Ico) {
+        return None;
+    }
+    let (claimed_w, claimed_h) = image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format().ok()?.into_dimensions().ok()?;
+    if claimed_w > MAX_IMAGE_SIDE || claimed_h > MAX_IMAGE_SIDE {
+        return None;
+    }
+    let need = claimed_w as u64 * claimed_h as u64 * 4;
+    if !reserve(&DECODED, need, DECODED_BUDGET) {
+        return None;
+    }
+    let give_back = || {
+        DECODED.fetch_sub(need, Ordering::SeqCst);
+    };
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(MAX_IMAGE_SIDE);
     limits.max_image_height = Some(MAX_IMAGE_SIDE);
     limits.max_alloc = Some(512 << 20);
     reader.limits(limits);
-    let mut rgba = reader.decode().ok()?.into_rgba8();
+    let Ok(picture) = reader.decode() else {
+        give_back();
+        return None;
+    };
+    decoded.fetch_add(need, Ordering::SeqCst);
+    let mut rgba = picture.into_rgba8();
     let (w, h) = rgba.dimensions();
     for p in rgba.pixels_mut() {
         p.0.swap(0, 2);
@@ -155,7 +199,29 @@ mod tests {
     fn network_paths_never_reach_the_file_system() {
         let doc = Path::new("/home/me/a.md");
         for p in [r"L\\attacker\share\a.png", "L//attacker/share/a.png", r"L\\?\C:\a.png", "L%5C%5Cattacker%5Cshare%5Ca.png"] {
-            assert!(read_image(p, Some(doc)).is_none(), "{p}");
+            assert!(read_image(p, Some(doc), &AtomicU64::new(0)).is_none(), "{p}");
         }
+    }
+
+    #[test]
+    fn decoded_images_stay_within_the_budget() {
+        let total = AtomicU64::new(0);
+        assert!(!reserve(&total, 16_384 * 16_384 * 4, u64::MAX), "one bomb is refused by itself");
+        assert_eq!(total.load(Ordering::SeqCst), 0);
+        assert!(reserve(&total, 300 << 20, 1 << 30));
+        assert!(reserve(&total, 300 << 20, 1 << 30));
+        assert!(reserve(&total, 300 << 20, 1 << 30));
+        assert!(!reserve(&total, 300 << 20, 1 << 30), "the fourth would pass the budget");
+        assert_eq!(total.load(Ordering::SeqCst), 900 << 20);
+    }
+
+    #[test]
+    fn only_listed_formats_decode() {
+        // A valid one-pixel binary PPM: the decoder is compiled in, but no document can reach it.
+        let (bytes, doc) = (b"P6 1 1 255 abc".to_vec(), std::env::temp_dir().join(format!("mdv-img-{}.md", std::process::id())));
+        let img = doc.with_extension("ppm");
+        std::fs::write(&img, bytes).unwrap();
+        assert!(read_image(&format!("L{}", img.display()), Some(&doc), &AtomicU64::new(0)).is_none());
+        std::fs::remove_file(&img).unwrap();
     }
 }
