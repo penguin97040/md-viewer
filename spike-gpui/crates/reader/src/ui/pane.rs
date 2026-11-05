@@ -392,14 +392,19 @@ impl ReaderView {
     fn build_layout(&mut self, i: usize, opts: &Options, window: &mut Window) -> Arc<ChunkLayout> {
         let doc = self.doc.clone().expect("document");
         let t = Instant::now();
-        let c = doc.chunk(i);
         let default = ChunkState::default();
         let st = self.states.get(&i).unwrap_or(&default);
         let n = doc.chunks.len();
         let mut shaper = GpuiShaper::new(window.text_system().clone());
         let extra = self.assets.as_deref();
         let assets = ViewAssets { images: &self.images, extra, content: ContentAssets::new(&self.content, opts.mode, self.content_scale) };
-        let l = Arc::new(layout::layout_chunk(&c, opts, st, i == 0, i + 1 == n, &mut shaper, &assets));
+        // On the UI thread a panic ends the process and so closes every window. If a document finds
+        // a bug here, its section comes up empty instead.
+        let laid = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let c = doc.chunk(i);
+            layout::layout_chunk(&c, opts, st, i == 0, i + 1 == n, &mut shaper, &assets)
+        }));
+        let l = Arc::new(laid.unwrap_or_else(|_| layout::ChunkLayout { height: opts.font_size * opts.line_height, layers: vec![Default::default()], ..Default::default() }));
         let waits = assets.waiting();
         if waits.is_empty() {
             self.waiting.remove(&i);

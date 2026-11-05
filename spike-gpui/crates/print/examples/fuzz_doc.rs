@@ -70,6 +70,11 @@ fn mutate(src: &[char], r: &mut Rng) -> String {
     c.into_iter().collect()
 }
 
+static STAGE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+fn stage(s: String) {
+    *STAGE.lock().unwrap_or_else(|e| e.into_inner()) = s;
+}
+
 struct Fake;
 impl Shaper for Fake {
     fn shape(&mut self, text: &str, _f: FontSpec, size: f32, out: &mut Vec<RawGlyph>) -> f32 {
@@ -97,6 +102,7 @@ fn exercise(src: &str, r: &mut Rng) {
         }
         assert_eq!(at, src.len(), "split {e}: must reach the end");
     }
+    stage("parse".into());
     let d = Document::parse(src.as_bytes().to_vec());
     let o = Options {
         width: [1.0, 40.0, 320.0, 800.0, 3000.0][r.below(5)],
@@ -110,9 +116,11 @@ fn exercise(src: &str, r: &mut Rng) {
     let n = d.chunks.len();
     for i in 0..n.min(64) {
         let c = d.chunk(i);
+        stage(format!("layout chunk {i} of {n} at width {} wrap {}", o.width, o.wrap));
         let l = layout_chunk(&c, &o, &ChunkState::default(), i == 0, i + 1 == n, &mut Fake, &NoAssets);
         assert!(l.height.is_finite() && l.height >= 0.0, "height {}", l.height);
     }
+    stage("search and selection".into());
     let _ = d.search("a");
     if n > 0 {
         let _ = d.text_between(DocPos::new(0, 0), DocPos::new(n as u32 - 1, u32::MAX));
@@ -123,8 +131,10 @@ fn exercise(src: &str, r: &mut Rng) {
 fn run_all(src: Arc<String>, seed: u64, pdf: bool) -> Result<(), String> {
     let h = std::thread::Builder::new().stack_size(1 << 20).spawn(move || {
         let mut r = Rng(seed | 1);
+        stage("split".into());
         exercise(&src, &mut r);
         if pdf {
+            stage("pdf".into());
             let d = Document::parse(src.as_bytes().to_vec());
             let _ = mdv_print::render_pdf(&d, &mdv_print::PrintOptions::default(), &mut |_| true);
         }
@@ -135,8 +145,39 @@ fn run_all(src: Arc<String>, seed: u64, pdf: bool) -> Result<(), String> {
     }
 }
 
+/// `fuzz_doc replay FILE`: runs each stage in turn and names it, to find what a saved input trips.
+fn replay(path: &str) {
+    let src = std::fs::read_to_string(path).expect("input");
+    for target in [1 << 10, 16 << 10] {
+        println!("split {target}");
+        let _ = split::split_sections(&src, target);
+    }
+    println!("parse");
+    let d = Document::parse(src.as_bytes().to_vec());
+    for width in [1.0, 40.0, 320.0, 800.0, 3000.0] {
+        for wrap in [true, false] {
+            println!("layout width {width} wrap {wrap}");
+            let o = Options { width, padding: 20.0, font_size: 17.0, line_height: 1.65, serif: false, wrap, mode: Mode::Dark };
+            for i in 0..d.chunks.len() {
+                let t = Instant::now();
+                let _ = layout_chunk(&d.chunk(i), &o, &ChunkState::default(), i == 0, i + 1 == d.chunks.len(), &mut Fake, &NoAssets);
+                println!("  chunk {i}: {:?}", t.elapsed());
+            }
+        }
+    }
+    println!("search and selection");
+    let _ = d.search("a");
+    let _ = d.text_between(DocPos::new(0, 0), DocPos::new(d.chunks.len() as u32 - 1, u32::MAX));
+    println!("pdf");
+    let _ = mdv_print::render_pdf(&d, &mdv_print::PrintOptions::default(), &mut |_| true);
+    println!("all stages finished");
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
+    if a[1] == "replay" {
+        return replay(&a[2]);
+    }
     let src: Vec<char> = std::fs::read_to_string(&a[1]).expect("seed").chars().collect();
     let out = std::path::PathBuf::from(&a[2]);
     std::fs::create_dir_all(&out).expect("out dir");
@@ -152,9 +193,19 @@ fn main() {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(1));
         let s = watch.load(Ordering::SeqCst);
-        if s != 0 && clock.elapsed().as_millis() as u64 - s > 60_000 {
+        if s != 0 && (clock.elapsed().as_millis() as u64).saturating_sub(s) > 60_000 {
             let _ = std::fs::copy(hang_dir.join("current.md"), hang_dir.join("hang.md"));
-            println!("HANG over 60 s; input saved");
+            // Spinning or blocked? Each thread's name, state and CPU time.
+            let mut states = String::new();
+            for t in std::fs::read_dir("/proc/self/task").into_iter().flatten().flatten() {
+                let stat = std::fs::read_to_string(t.path().join("stat")).unwrap_or_default();
+                let f: Vec<&str> = stat.split_whitespace().collect();
+                if f.len() > 14 {
+                    states.push_str(&format!("{} {} u{} s{}; ", f[1], f[2], f[13], f[14]));
+                }
+            }
+            println!("threads: {states}");
+            println!("HANG over 60 s in {}; input saved", STAGE.lock().unwrap_or_else(|e| e.into_inner()));
             std::process::exit(3);
         }
     });
