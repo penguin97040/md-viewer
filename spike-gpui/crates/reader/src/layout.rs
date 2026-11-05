@@ -2669,6 +2669,21 @@ mod link_tests {
         }
     }
 
+    /// Layout runs on the UI thread, and a Windows main thread may have only 1 MiB of stack. A real
+    /// frame adds GPUI's own stack on top, so leave well over half of that spare.
+    #[test]
+    fn deepest_allowed_nesting_fits_a_small_stack() {
+        let run = || {
+            let o = Options { width: 800.0, padding: 20.0, font_size: 20.0, line_height: 1.5, serif: false, wrap: true, mode: Mode::Dark };
+            for src in [">".repeat(5000) + " end", "- ".repeat(5000) + "end", "<blockquote>".repeat(5000) + "end", "<details open>".repeat(5000) + "end", "<ul><li>".repeat(5000) + "end", "a ".to_string() + &"<b>".repeat(5000) + "end", "a ".to_string() + &"<a href=x>".repeat(5000) + "end"] {
+                let w = parse_whole(&src, 1 << 30, false);
+                let l = layout_chunk(&w.chunks[0], &o, &ChunkState::default(), true, true, &mut Fake, &NoAssets);
+                assert!(l.height > 0.0, "{}", &src[..12]);
+            }
+        };
+        std::thread::Builder::new().stack_size(512 * 1024).spawn(run).unwrap().join().unwrap();
+    }
+
     #[test]
     fn footnote_markers_and_arrows_are_links() {
         let o = Options { width: 800.0, padding: 20.0, font_size: 20.0, line_height: 1.5, serif: false, wrap: true, mode: Mode::Dark };

@@ -196,6 +196,11 @@ enum Wrap {
     Plain,
 }
 
+/// Levels of blocks or of inline styles the model keeps. Layout, painting and dropping the model
+/// all recurse, and a stack overflow aborts the process, which `catch_unwind` cannot contain and
+/// which would close every window. Past this, contents join their parent and keep their text.
+pub const MAX_NESTING: usize = 64;
+
 struct Open {
     wrap: Wrap,
     /// The raw HTML tag name that closes this level; `None` for markdown syntax.
@@ -354,6 +359,13 @@ impl<'a, 's> Builder<'a, 's> {
     fn pop_frame(&mut self, end: u32) {
         self.close_inline(end);
         let f = self.frames.pop().expect("frame");
+        if self.frames.len() > MAX_NESTING && !matches!(f.kind, Kind::Item { .. } | Kind::Def | Kind::Table { .. }) {
+            let parent = self.frames.last_mut().expect("root frame");
+            parent.blocks.extend(f.blocks);
+            parent.blocks.extend(f.items.into_iter().flat_map(|i| i.blocks));
+            parent.blocks.extend(f.defs.into_iter().flat_map(|d| d.definitions).flatten());
+            return;
+        }
         let span = self.span_from(f.src, f.text, end);
         match f.kind {
             Kind::Root => unreachable!("the root frame is never popped"),
@@ -443,7 +455,7 @@ impl<'a, 's> Builder<'a, 's> {
         // Unclosed raw tags close at the end of their block.
         while ctx.stack.len() > 1 {
             let top = ctx.stack.pop().expect("level");
-            let inline = finish_wrap(top);
+            let inline = finish_wrap(top, ctx.stack.len());
             ctx.stack.last_mut().expect("root").content.extend(inline);
         }
         let mut content = ctx.stack.pop().expect("root").content;
@@ -554,7 +566,7 @@ impl<'a, 's> Builder<'a, 's> {
         if let Wrap::Link(..) = top.wrap {
             self.link_depth -= 1;
         }
-        let items = finish_wrap(top);
+        let items = finish_wrap(top, ctx.stack.len());
         let ctx = self.inline.as_mut().expect("inline context");
         ctx.stack.last_mut().expect("root").content.extend(items);
     }
@@ -1497,7 +1509,10 @@ impl<'a, 's> Builder<'a, 's> {
     }
 }
 
-fn finish_wrap(top: Open) -> Vec<Inline> {
+fn finish_wrap(top: Open, depth: usize) -> Vec<Inline> {
+    if depth > MAX_NESTING {
+        return top.content;
+    }
     match top.wrap {
         Wrap::Root | Wrap::Plain => top.content,
         Wrap::Style(style) => vec![Inline::Styled { style, content: top.content }],
@@ -1844,6 +1859,41 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Stands in for the whole recursive path: dropping the model recurses just as layout does.
+    #[test]
+    fn hostile_nesting_is_bounded_and_keeps_its_text() {
+        fn depth(b: &[Block]) -> usize {
+            b.iter()
+                .map(|x| match x {
+                    Block::Quote { blocks, .. } | Block::Aligned { blocks, .. } => 1 + depth(blocks),
+                    Block::Details(d) => 1 + depth(&d.blocks),
+                    Block::List(l) => 1 + l.items.iter().map(|i| depth(&i.blocks)).max().unwrap_or(0),
+                    Block::DefinitionList { items, .. } => 1 + items.iter().flat_map(|i| &i.definitions).map(|d| depth(d)).max().unwrap_or(0),
+                    _ => 0,
+                })
+                .max()
+                .unwrap_or(0)
+        }
+        fn inline_depth(i: &[Inline]) -> usize {
+            i.iter()
+                .map(|x| match x {
+                    Inline::Styled { content, .. } | Inline::Link { content, .. } => 1 + inline_depth(content),
+                    _ => 0,
+                })
+                .max()
+                .unwrap_or(0)
+        }
+        for src in [">".repeat(20_000) + " end", "- ".repeat(20_000) + "end", "<blockquote>".repeat(20_000) + "end", "<details>".repeat(20_000) + "end", "<ul><li>".repeat(20_000) + "end", "<div align=center>".repeat(20_000) + "end"] {
+            let c = parse_whole(&src, 1 << 30, false).chunks.into_iter().next().unwrap();
+            assert!(depth(&c.blocks) <= MAX_NESTING + 2, "{}: {}", &src[..12], depth(&c.blocks));
+            assert!(c.text.contains("end"), "{}", &src[..12]);
+        }
+        let c = parse_whole(&("a ".to_string() + &"<b>".repeat(20_000) + "end"), 1 << 30, false).chunks.into_iter().next().unwrap();
+        let Block::Paragraph { content, .. } = &c.blocks[0] else { panic!() };
+        assert!(inline_depth(content) <= MAX_NESTING + 2);
+        assert!(c.text.contains("end"));
     }
 
     #[test]
