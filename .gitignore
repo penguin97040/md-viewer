@@ -11,3 +11,4 @@ testdata/big*.md
 Thumbs.db
 .vscode/
 .idea/
+spike-gpui/target/
