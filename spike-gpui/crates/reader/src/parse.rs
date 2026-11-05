@@ -1522,11 +1522,19 @@ fn finish_wrap(top: Open, depth: usize) -> Vec<Inline> {
 
 /// Clamps the spans of the last inline chain after trailing white space was removed.
 fn shrink_to(content: &mut [Inline], end: u32) {
-    let Some(last) = content.last_mut() else { return };
-    match last {
-        Inline::Text(s) | Inline::Code(s) => s.end = s.end.min(end),
-        Inline::Styled { content, .. } | Inline::Link { content, .. } => shrink_to(content, end),
-        _ => {}
+    // Not only the last: empty maths after a soft break sits past the space being dropped.
+    for x in content.iter_mut().rev() {
+        match x {
+            Inline::Text(s) | Inline::Code(s) | Inline::Math { text: s, .. } => {
+                s.start = s.start.min(end);
+                s.end = s.end.min(end);
+                if s.start < end {
+                    return;
+                }
+            }
+            Inline::Styled { content, .. } | Inline::Link { content, .. } => shrink_to(content, end),
+            _ => return,
+        }
     }
 }
 
@@ -1894,6 +1902,25 @@ mod tests {
         let Block::Paragraph { content, .. } = &c.blocks[0] else { panic!() };
         assert!(inline_depth(content) <= MAX_NESTING + 2);
         assert!(c.text.contains("end"));
+    }
+
+    /// Nine bytes that used to end the process from the UI thread.
+    #[test]
+    fn empty_maths_after_a_soft_break_stays_in_the_text() {
+        fn check(i: &[Inline], len: u32) {
+            for x in i {
+                match x {
+                    Inline::Text(s) | Inline::Code(s) | Inline::Math { text: s, .. } => assert!(s.start <= s.end && s.end <= len, "{s:?} in {len}"),
+                    Inline::Styled { content, .. } | Inline::Link { content, .. } => check(content, len),
+                    _ => {}
+                }
+            }
+        }
+        for src in ["$$$$\n$$$$", "$$$$\n$$$$ ", "*$$$$*\n$$$$", "a\n$$$$", "**a**\n$$$$\n$$$$"] {
+            let c = parse_whole(src, 1 << 30, false).chunks.into_iter().next().unwrap();
+            let Block::Paragraph { content, .. } = &c.blocks[0] else { panic!("{src}") };
+            check(content, c.text.len() as u32);
+        }
     }
 
     #[test]
