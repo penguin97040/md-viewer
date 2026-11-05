@@ -6,3 +6,46 @@ publish.workspace = true
 
 [dependencies]
 mdv-theme.workspace = true
+ratex-types.workspace = true
+ratex-parser.workspace = true
+ratex-layout.workspace = true
+ratex-svg.workspace = true
+mermaid-rs-renderer.workspace = true
+resvg.workspace = true
+usvg.workspace = true
+roxmltree.workspace = true
+
+[dev-dependencies]
+png.workspace = true
+
+[[example]]
+name = "gallery"
+path = "examples/gallery.rs"
+
+[[example]]
+name = "hostile"
+path = "examples/hostile.rs"
+
+[[example]]
+name = "scale"
+path = "examples/scale.rs"
+
+[[example]]
+name = "fuzz"
+path = "examples/fuzz.rs"
+
+[[example]]
+name = "size_base"
+path = "examples/size_base.rs"
+
+[[example]]
+name = "size_math"
+path = "examples/size_math.rs"
+
+[[example]]
+name = "size_mermaid"
+path = "examples/size_mermaid.rs"
+
+[[example]]
+name = "size_all"
+path = "examples/size_all.rs"
