@@ -64,3 +64,51 @@ pub fn rasterise(asset: &RenderedAsset, scale: f32) -> Result<RgbaImage, Content
     }
     Ok(RgbaImage { width: w, height: h, pixels })
 }
+
+/// Strength of the light-on-dark boost: the exponent applied to partial coverage drops by this
+/// much for a pure white pixel (see `boost_light_on_dark`).
+pub const LIGHT_ON_DARK_BOOST: f32 = 0.2;
+
+/// Thickens light strokes that will be blended over a dark background.
+///
+/// The GPU blends rasters in gamma-encoded sRGB, so a half-covered pixel of a light stroke on black
+/// carries less than half of the light a viewer expects, while the same stroke dark on white
+/// carries more. Light-on-dark text therefore looks thinner and dimmer than the same glyphs in the
+/// light scheme. Browsers and GPUI's own text correct for this with a contrast boost; this does the
+/// same for rasters, raising partial coverage by `alpha^(1 - k * luma)`. Opaque and transparent
+/// pixels are unchanged, and dark pixels (a diagram's node fills) hardly move. `rgba` is straight
+/// alpha, as `rasterise` returns it.
+pub fn boost_light_on_dark(img: &mut RgbaImage) {
+    // 256-entry table per luma step would be exact; the exponent varies slowly, so 16 steps do.
+    let mut table = [[0u8; 256]; 17];
+    for (step, row) in table.iter_mut().enumerate() {
+        let e = 1.0 - LIGHT_ON_DARK_BOOST * (step as f32 / 16.0);
+        for (a, out) in row.iter_mut().enumerate() {
+            *out = ((a as f32 / 255.0).powf(e) * 255.0).round().min(255.0) as u8;
+        }
+    }
+    for px in img.pixels.chunks_exact_mut(4) {
+        let a = px[3];
+        if a == 0 || a == 255 {
+            continue;
+        }
+        let luma = (px[0] as u32 * 2126 + px[1] as u32 * 7152 + px[2] as u32 * 722) / 10_000;
+        px[3] = table[((luma * 16 + 127) / 255) as usize][a as usize];
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn boost_raises_light_partial_coverage_only() {
+        let mut img = RgbaImage { width: 4, height: 1, pixels: vec![255, 255, 255, 128, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 128] };
+        boost_light_on_dark(&mut img);
+        assert!(img.pixels[3] > 128 && img.pixels[3] < 255, "white partial rises: {}", img.pixels[3]);
+        assert_eq!(img.pixels[7], 255);
+        assert_eq!(img.pixels[11], 0);
+        assert_eq!(img.pixels[15], 128, "black is untouched");
+        assert_eq!(&img.pixels[0..3], &[255, 255, 255], "colour is never changed");
+    }
+}

@@ -22,7 +22,7 @@ mod mermaid;
 mod raster;
 pub mod svgcheck;
 
-pub use raster::{rasterise, RgbaImage};
+pub use raster::{boost_light_on_dark, rasterise, RgbaImage};
 
 /// Colour scheme of a rendered asset. `Print` is the light scheme with pure-black text and no
 /// background, matching `printDiagrams` in `frontend/extras.js`.

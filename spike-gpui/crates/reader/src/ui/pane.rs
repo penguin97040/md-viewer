@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     div, fill, point, prelude::*, px, quad, rgb, size, App, Bounds, BorderStyle, ClipboardItem, ContentMask, Context, Corners, CursorStyle, DispatchPhase, Edges, Element, ElementId, Entity, EventEmitter, FontId, GlobalElementId,
-    GlyphId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels, Render, ScrollEvent, Style, Window,
+    GlyphId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels, Render, RenderImage, ScrollEvent, Style, Window,
 };
 use mdv_theme::Mode;
 
@@ -1801,6 +1801,22 @@ fn text_box_on_line(b: &TextBox, l: &layout::Line, byte: u32) -> (f32, f32) {
     }
 }
 
+/// Where to paint a maths or diagram raster so that every raster pixel lands on exactly one device
+/// pixel. The raster is `ceil(size * scale)` pixels, so painting it into the layout size (a
+/// fractional number of device pixels, at a fractional offset) makes the GPU resample it with a
+/// bilinear filter, which softens thin strokes. A raster reduced for size (a different scale from
+/// the window's) is painted at the layout size instead.
+fn device_aligned(x: f32, top: f32, w: f32, h: f32, img: &RenderImage, scale: f32) -> Bounds<Pixels> {
+    let sz = img.size(0);
+    let (iw, ih) = (sz.width.0 as f32, sz.height.0 as f32);
+    let exact = (iw - (w * scale).ceil()).abs() < 1.0 && (ih - (h * scale).ceil()).abs() < 1.0;
+    if !exact {
+        return Bounds::new(point(px(x), px(top)), size(px(w), px(h)));
+    }
+    let (l, t) = ((x * scale).round(), (top * scale).round());
+    Bounds::new(point(px(l / scale), px(t / scale)), size(px(iw / scale), px(ih / scale)))
+}
+
 fn paint_atom(a: &layout::AtomDraw, x: f32, bottom: f32, color: u32, images: &ImageStore, content: &ContentStore, window: &mut Window) {
     match a {
         layout::AtomDraw::Image { key, w, h } => {
@@ -1816,7 +1832,7 @@ fn paint_atom(a: &layout::AtomDraw, x: f32, bottom: f32, color: u32, images: &Im
         }
         layout::AtomDraw::Asset { key, w, h } => {
             if let Some(img) = content.by_key(*key) {
-                let bounds = Bounds::new(point(px(x), px(bottom - h)), size(px(*w), px(*h)));
+                let bounds = device_aligned(x, bottom - h, *w, *h, &img, window.scale_factor());
                 let _ = window.paint_image(bounds, bounds, Corners::all(px(0.0)), img, 0, false);
             }
         }

@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use gpui::RenderImage;
-use mdv_content::{rasterise, ContentTheme, DiagramOptions, MathOptions, RenderedAsset};
+use mdv_content::{boost_light_on_dark, rasterise, ContentTheme, DiagramOptions, MathOptions, RenderedAsset};
 
 use crate::layout::{AssetBox, Assets, ImageState};
 use crate::model::ImageSource;
@@ -265,15 +265,22 @@ fn run(job: &Job) -> Result<Done, String> {
     if px > MAX_RASTER_PIXELS {
         scale *= (MAX_RASTER_PIXELS / px).sqrt();
     }
-    let img = rasterise(&asset, scale).map_err(|e| e.to_string())?;
+    let mut img = rasterise(&asset, scale).map_err(|e| e.to_string())?;
+    let dark = match &job.kind {
+        Kind::Math { opts, .. } => opts.theme == ContentTheme::Dark,
+        Kind::Mermaid { opts, .. } => opts.theme == ContentTheme::Dark,
+    };
+    if dark {
+        boost_light_on_dark(&mut img);
+    }
     let mut px = img.pixels;
-    // BGRA with premultiplied alpha, which is what the GPU path expects.
+    // BGRA with straight (not premultiplied) alpha. GPUI's image shader outputs the sampled colour
+    // unmodified and relies on the blend state (`SRC_ALPHA`, `INV_SRC_ALPHA` on Direct3D, the
+    // non-premultiplied `ALPHA_BLENDING` on wgpu) to apply alpha; premultiplying here as well
+    // multiplied partial pixels by alpha twice, which dimmed light strokes on dark far more than
+    // dark strokes on light.
     for p in px.chunks_exact_mut(4) {
-        let a = p[3] as u32;
-        let (r, g, b) = (p[0] as u32, p[1] as u32, p[2] as u32);
-        p[0] = ((b * a + 127) / 255) as u8;
-        p[1] = ((g * a + 127) / 255) as u8;
-        p[2] = ((r * a + 127) / 255) as u8;
+        p.swap(0, 2);
     }
     let bytes = px.len();
     let buf = image::RgbaImage::from_raw(img.width, img.height, px).ok_or_else(|| "bad raster size".to_string())?;
