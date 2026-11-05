@@ -13,3 +13,5 @@ mdv-reader.workspace = true
 mdv-content.workspace = true
 mdv-platform.workspace = true
 mdv-print.workspace = true
+raw-window-handle.workspace = true
+async-channel.workspace = true

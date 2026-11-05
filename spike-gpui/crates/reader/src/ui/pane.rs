@@ -804,6 +804,34 @@ impl ReaderView {
         Some(DocPos::new(v.chunk as u32, off))
     }
 
+    /// The text of the visible chunks, a line at a time, in window coordinates.
+    fn a11y_lines(&self, bounds: Bounds<Pixels>) -> Vec<A11yLine> {
+        let Some(doc) = self.doc.as_ref() else { return Vec::new() };
+        let (ox, oy) = (f64::from(f32::from(bounds.origin.x)), f64::from(f32::from(bounds.origin.y)));
+        let mut out = Vec::new();
+        for vis in &self.visible {
+            let content = doc.chunk(vis.chunk);
+            for (li, layer) in vis.layout.layers.iter().enumerate() {
+                for (bi, b) in layer.boxes.iter().enumerate() {
+                    for (ni, line) in b.lines.iter().enumerate() {
+                        let text = content.text.get(line.byte0 as usize..line.byte1 as usize).unwrap_or("").trim_end_matches('\n');
+                        if text.is_empty() {
+                            continue;
+                        }
+                        let y0 = oy + f64::from(vis.y + line.top);
+                        let x0 = ox + f64::from(line.x);
+                        out.push(A11yLine {
+                            key: (vis.chunk, li, bi, ni),
+                            text: text.to_string(),
+                            rect: gpui::accesskit::Rect { x0, y0, x1: x0 + f64::from(line.width), y1: y0 + f64::from(line.height) },
+                        });
+                    }
+                }
+            }
+        }
+        out
+    }
+
     pub fn selected_text(&self) -> Option<String> {
         let s = self.selection?;
         let (a, b) = s.ordered();
@@ -1387,13 +1415,22 @@ fn same_target(a: &HitKind, b: &HitKind) -> bool {
 
 impl Render for ReaderView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div().flex_1().min_w_0().h_full().child(ReaderElement { view: cx.entity() })
+        div().flex_1().min_w_0().h_full().child(ReaderElement { a11y_lines: Vec::new(), view: cx.entity() })
     }
 }
 
 /// The element GPUI lays out and paints. It holds no state of its own.
 pub struct ReaderElement {
     view: Entity<ReaderView>,
+    a11y_lines: Vec<A11yLine>,
+}
+
+/// One laid-out line of text, for assistive technology. A route check, not the full exposure: only
+/// the chunks on screen, flat, with no heading structure, and the Document is not focusable yet.
+struct A11yLine {
+    key: (usize, usize, usize, usize),
+    text: String,
+    rect: gpui::accesskit::Rect,
 }
 
 impl IntoElement for ReaderElement {
@@ -1413,10 +1450,24 @@ impl Element for ReaderElement {
     type PrepaintState = FrameState;
 
     fn id(&self) -> Option<ElementId> {
-        None
+        Some("reader-pane".into())
     }
     fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
         None
+    }
+    fn a11y_role(&self) -> Option<gpui::accesskit::Role> {
+        Some(gpui::accesskit::Role::Document)
+    }
+    fn a11y_synthetic_children(&mut self, _prepaint: &mut Self::PrepaintState, builder: &mut gpui::A11ySubtreeBuilder) {
+        use gpui::accesskit::{Node, Role};
+        for line in self.a11y_lines.drain(..) {
+            let mut run = Node::new(Role::TextRun);
+            run.set_bounds(line.rect);
+            run.set_character_lengths(line.text.chars().map(|c| c.len_utf8() as u8).collect::<Vec<u8>>());
+            run.set_value(line.text);
+            let id = builder.synthetic_node_id(line.key);
+            builder.push_child(id, run);
+        }
     }
 
     fn request_layout(&mut self, _id: Option<&GlobalElementId>, _i: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, ()) {
@@ -1427,6 +1478,13 @@ impl Element for ReaderElement {
     fn prepaint(&mut self, _id: Option<&GlobalElementId>, _i: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _r: &mut (), window: &mut Window, cx: &mut App) -> FrameState {
         let started = Instant::now();
         self.view.update(cx, |v, cx| v.prepare_frame(bounds, window, cx));
+        if window.is_a11y_active() {
+            let t0 = Instant::now();
+            self.a11y_lines = self.view.read(cx).a11y_lines(bounds);
+            if std::env::var_os("MDV_A11Y_PERF").is_some() {
+                eprintln!("[a11y] {} lines in {:?}", self.a11y_lines.len(), t0.elapsed());
+            }
+        }
         FrameState { hitbox: window.insert_hitbox(bounds, HitboxBehavior::Normal), started }
     }
 

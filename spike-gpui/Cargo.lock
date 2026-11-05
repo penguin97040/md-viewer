@@ -3261,6 +3261,7 @@ name = "md-viewer-gpui"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "async-channel",
  "gpui-pre",
  "gpui-pre-platform",
  "mdv-content",
@@ -3268,6 +3269,7 @@ dependencies = [
  "mdv-print",
  "mdv-reader",
  "mdv-theme",
+ "raw-window-handle",
 ]
 
 [[package]]
@@ -3292,7 +3294,11 @@ dependencies = [
 name = "mdv-platform"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "mdv-theme",
+ "raw-window-handle",
+ "windows 0.62.2",
+ "x11rb",
 ]
 
 [[package]]

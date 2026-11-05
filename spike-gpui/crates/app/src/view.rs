@@ -5,17 +5,20 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use gpui::{
-    canvas, div, point, prelude::*, px, relative, uniform_list, Bounds, Context, CursorStyle,
+    accesskit::{ActionData, Toggled}, canvas, div, point, prelude::*, px, relative, uniform_list,
+    AccessibleAction, Bounds, Context, CursorStyle, Role, ScrollStrategy,
     Decorations, Div, FocusHandle, FontWeight, HitboxBehavior, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ResizeEdge,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ResizeEdge, ScrollHandle,
     SharedString, Stateful, UniformListScrollHandle, Window, WindowControlArea,
 };
 use mdv_theme::{metrics as m, Mode};
 
+use crate::a11y;
 // reader: the real reader pane, its find field and file opening.
 use mdv_reader::ui::{field, pane::{self, ReaderEvent, ReaderView}};
 use std::path::PathBuf;
 use crate::assets;
+use crate::tab_move::{self, TabId, TabState};
 use crate::ui::{c, icon, spaced, tabular, tooltip, transparent, up};
 
 pub const VERSION: &str = "0.2.6";
@@ -30,11 +33,30 @@ pub struct Heading {
 }
 
 pub struct TabData {
+    pub id: TabId,
     pub name: SharedString,
     pub path: SharedString,
     pub headings: std::rc::Rc<Vec<Heading>>,
+    /// Follows the tab between windows. Add per-tab reader state here, not to `AppView`.
+    pub state: TabState,
     /// reader: `None` only for the chrome's stub demo tabs.
     pub reader: Option<gpui::Entity<ReaderView>>,
+    /// Reader events go to whichever window holds the tab, so this is remade on every move.
+    pub reader_events: Option<gpui::Subscription>,
+}
+
+impl TabData {
+    pub fn new(name: SharedString, path: SharedString, headings: std::rc::Rc<Vec<Heading>>) -> Self {
+        Self { id: tab_move::next_tab_id(), name, path, headings, state: TabState::default(), reader: None, reader_events: None }
+    }
+}
+
+/// The insertion marker on a strip, in window coordinates (`.tab-insertion`).
+#[derive(Clone, Copy)]
+pub struct DropMarker {
+    pub x: f32,
+    pub top: f32,
+    pub height: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -63,6 +85,24 @@ enum StepKey {
     Padding,
     FontSize,
     LineHeight,
+}
+
+impl StepKey {
+    fn range(self) -> (f32, f32, f32) {
+        match self {
+            StepKey::Padding => (20.0, 40.0, 4.0),
+            StepKey::FontSize => (12.0, 28.0, 1.0),
+            StepKey::LineHeight => (1.2, 2.2, 0.05),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            StepKey::Padding => "Padding",
+            StepKey::FontSize => "Font size",
+            StepKey::LineHeight => "Line spacing",
+        }
+    }
 }
 
 pub struct AppView {
@@ -95,6 +135,17 @@ pub struct AppView {
     pub started: Instant,
     first_render_logged: bool,
     pub print: Option<crate::print::Running>,
+    // tab movement: see tab_move.rs
+    pub tab_scroll: ScrollHandle,
+    pub drop_marker: Option<DropMarker>,
+    pub moving: Option<TabId>,
+    tab_focus: HashMap<TabId, FocusHandle>,
+    // accessibility: see a11y.rs
+    doc_sample: Option<a11y::DocSample>,
+    title: String,
+    /// The find input is about to go. Without this, focus stays on a removed element and key events
+    /// no longer pass through the root's handlers.
+    refocus_root: bool,
 }
 
 impl AppView {
@@ -128,6 +179,106 @@ impl AppView {
             perf: std::env::var("MDV_PERF").is_ok(),
             started: Instant::now(),
             first_render_logged: false,
+            tab_scroll: ScrollHandle::new(),
+            drop_marker: None,
+            moving: None,
+            tab_focus: HashMap::new(),
+            doc_sample: a11y::DocSample::from_env(),
+            title: String::new(),
+            refocus_root: false,
+        }
+    }
+
+    // ---- tab state (tab movement: see tab_move.rs) -------------------------------------------
+
+    /// Copies the view's per-tab fields into the active tab, so they travel with it.
+    fn save_active_state(&mut self) {
+        let (current, offset, web) = (self.current, self.toc_scroll.0.borrow().base_handle.offset().y, self.web_bar);
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.state.current_heading = current;
+            tab.state.toc_offset = offset;
+            tab.state.web_bar = web;
+        }
+    }
+
+    /// The reverse of `save_active_state`, after `active` changed.
+    fn load_active_state(&mut self) {
+        let state = self.tabs.get(self.active).map(|t| (t.state.current_heading, t.state.toc_offset, t.state.web_bar));
+        let (current, offset, web) = state.unwrap_or((0, px(0.0), false));
+        self.current = current;
+        self.web_bar = web;
+        let handle = self.toc_scroll.0.borrow().base_handle.clone();
+        let mut o = handle.offset();
+        o.y = offset;
+        handle.set_offset(o);
+    }
+
+    fn select_index(&mut self, i: usize, cx: &mut Context<Self>) {
+        if i < self.tabs.len() && i != self.active {
+            self.save_active_state();
+            self.active = i;
+            self.load_active_state();
+            self.tab_scroll.scroll_to_item(i);
+            cx.notify();
+        }
+    }
+
+    pub fn activate_tab(&mut self, id: TabId, cx: &mut Context<Self>) {
+        if let Some(i) = self.tabs.iter().position(|t| t.id == id) {
+            self.select_index(i, cx);
+        }
+    }
+
+    /// Moves a tab within this strip. `at` is an insertion index with the tab still in place. The
+    /// same tab stays active and the strip's order is the keyboard order.
+    pub fn reorder_tab(&mut self, id: TabId, at: usize) -> bool {
+        let Some(from) = self.tabs.iter().position(|t| t.id == id) else { return false };
+        let active = self.tabs.get(self.active).map(|t| t.id);
+        let moved = mdv_platform::order::reorder(&mut self.tabs, from, at);
+        if let Some(i) = active.and_then(|a| self.tabs.iter().position(|t| t.id == a)) {
+            self.active = i;
+        }
+        moved
+    }
+
+    /// Takes a tab out of this strip for moving elsewhere, with its current state.
+    pub fn take_tab(&mut self, id: TabId, cx: &mut Context<Self>) -> Option<TabData> {
+        self.save_active_state();
+        let i = self.tabs.iter().position(|t| t.id == id)?;
+        let data = self.tabs.remove(i);
+        self.tab_focus.remove(&id);
+        self.active = mdv_platform::order::active_after_removal(self.active, i, self.tabs.len());
+        self.load_active_state();
+        cx.notify();
+        Some(data)
+    }
+
+    /// Adds a tab at insertion index `at` and makes it active, restoring its state.
+    pub fn insert_tab(&mut self, mut data: TabData, at: usize, cx: &mut Context<Self>) {
+        self.save_active_state();
+        if let Some(r) = data.reader.clone() {
+            data.reader_events = Some(Self::reader_events(&r, cx));
+        }
+        let at = at.min(self.tabs.len());
+        self.tabs.insert(at, data);
+        self.active = at;
+        self.load_active_state();
+        self.tab_scroll.scroll_to_item(at);
+        cx.notify();
+    }
+
+    fn close_tab(&mut self, id: TabId, cx: &mut Context<Self>) {
+        if let Some(i) = self.tabs.iter().position(|t| t.id == id) {
+            let was_active = i == self.active;
+            if !was_active {
+                self.save_active_state();
+            }
+            self.tabs.remove(i);
+            self.tab_focus.remove(&id);
+            self.active = mdv_platform::order::active_after_removal(self.active, i, self.tabs.len());
+            self.load_active_state();
+            cx.notify();
+            cx.defer(|cx| tab_move::log_state("close-tab", "", cx));
         }
     }
 
@@ -149,31 +300,40 @@ impl AppView {
         pane::Settings { padding: self.s.padding, font_size: self.s.font_size, line_height: self.s.line_height, serif: self.s.serif, wrap: self.s.wrap, mode: self.mode }
     }
 
+    fn reader_events(reader: &gpui::Entity<ReaderView>, cx: &mut Context<Self>) -> gpui::Subscription {
+        cx.subscribe(reader, |this, _, e: &ReaderEvent, cx| match e {
+            ReaderEvent::OpenLocal { path, fragment } => this.open_path(path.clone(), fragment.clone(), cx),
+            ReaderEvent::Toast(m) => this.show_toast(m, false, cx),
+        })
+    }
+
     /// Opens a file in a tab, or switches to its existing tab. One tab per file.
     pub fn open_path(&mut self, path: PathBuf, fragment: Option<String>, cx: &mut Context<Self>) {
         let path = std::fs::canonicalize(&path).unwrap_or(path);
         let shown: SharedString = path.to_string_lossy().to_string().into();
         if let Some(i) = self.tabs.iter().position(|t| t.path == shown) {
-            self.active = i;
-            self.current = 0;
+            self.select_index(i, cx);
             if let (Some(f), Some(r)) = (fragment, self.tabs[i].reader.clone()) {
                 r.update(cx, |r, cx| r.jump_to_fragment(&f, cx));
             }
             cx.notify();
             return;
         }
+        // One tab per file across all windows, not just this one.
+        if tab_move::focus_in_other_window(&shown, fragment.as_deref(), cx) {
+            return;
+        }
         let name: SharedString = path.file_name().map_or("Untitled".to_string(), |n| n.to_string_lossy().to_string()).into();
         let settings = self.reader_settings();
         let reader = cx.new(|cx| ReaderView::new(settings, cx));
-        cx.subscribe(&reader, |this, _, e: &ReaderEvent, cx| match e {
-            ReaderEvent::OpenLocal { path, fragment } => this.open_path(path.clone(), fragment.clone(), cx),
-            ReaderEvent::Toast(m) => this.show_toast(m, false, cx),
-        })
-        .detach();
         let first = self.tabs.iter().all(|t| t.reader.is_none());
-        self.tabs.push(TabData { name, path: shown.clone(), headings: Default::default(), reader: Some(reader.clone()) });
+        self.save_active_state();
+        let mut tab = TabData::new(name, shown.clone(), Default::default());
+        tab.reader_events = Some(Self::reader_events(&reader, cx));
+        tab.reader = Some(reader.clone());
+        self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
-        self.current = 0;
+        self.load_active_state();
         if first {
             mdv_reader::ui::script::start(reader.clone(), cx);
         }
@@ -222,7 +382,9 @@ impl AppView {
     }
 
     fn find_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let _ = window;
+        // Real focus as well as `find_focus`, so assistive technology hears about the input.
+        let input = self.fh("find-input", cx);
+        window.focus(&input, cx);
         self.find_open = true;
         self.find_focus = true;
         self.find_started = Instant::now();
@@ -266,6 +428,7 @@ impl AppView {
     }
 
     fn find_close(&mut self, cx: &mut Context<Self>) {
+        self.refocus_root = true;
         self.find_open = false;
         self.find_focus = false;
         if let Some(r) = self.reader() {
@@ -336,18 +499,26 @@ impl AppView {
     }
 
     fn step(&mut self, key: StepKey, dir: f32) {
-        let (lo, hi, step) = match key {
-            StepKey::Padding => (20.0, 40.0, 4.0),
-            StepKey::FontSize => (12.0, 28.0, 1.0),
-            StepKey::LineHeight => (1.2, 2.2, 0.05),
-        };
+        let (_, _, step) = key.range();
+        self.set_step_value(key, self.step_value(key) + dir * step);
+    }
+
+    fn step_value(&self, key: StepKey) -> f32 {
+        match key {
+            StepKey::Padding => self.s.padding,
+            StepKey::FontSize => self.s.font_size,
+            StepKey::LineHeight => self.s.line_height,
+        }
+    }
+
+    fn set_step_value(&mut self, key: StepKey, value: f32) {
+        let (lo, hi, _) = key.range();
         let slot = match key {
             StepKey::Padding => &mut self.s.padding,
             StepKey::FontSize => &mut self.s.font_size,
             StepKey::LineHeight => &mut self.s.line_height,
         };
-        let v = ((*slot + dir * step) * 100.0).round() / 100.0;
-        *slot = v.clamp(lo, hi);
+        *slot = ((value * 100.0).round() / 100.0).clamp(lo, hi);
     }
 
     fn key_down(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -358,8 +529,31 @@ impl AppView {
             match k {
                 "f" => self.find_open(window, cx),
                 "b" => self.toc_open = !self.toc_open,
-                "o" => self.prompt_open(cx),
+                "o" => {
+                    if !tab_move::open_next_from_queue(self, cx) {
+                        self.prompt_open(cx)
+                    }
+                }
+                // tab keys: order follows the strip (README shortcut table)
+                "w" => {
+                    if let Some(id) = self.tabs.get(self.active).map(|t| t.id) {
+                        self.close_tab(id, cx);
+                    }
+                }
+                "tab" if md.control => self.next_tab(if md.shift { -1 } else { 1 }, cx),
+                "pagedown" => self.next_tab(1, cx),
+                "pageup" => self.next_tab(-1, cx),
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" if !md.shift => {
+                    let n = self.tabs.len();
+                    let i = if k == "9" { n.saturating_sub(1) } else { k.parse::<usize>().unwrap_or(1) - 1 };
+                    self.select_index(i, cx);
+                }
                 "p" => self.start_print(cx),
+                "r" => self.show_toast("Reloading is not part of this spike", false, cx),
+                "=" | "+" => self.step(StepKey::FontSize, 1.0),
+                "-" => self.step(StepKey::FontSize, -1.0),
+                "0" => self.s.font_size = Settings::DEFAULTS.font_size,
+                "d" if md.shift => self.mode = if self.mode == Mode::Dark { Mode::Light } else { Mode::Dark },
                 // reader: anything else with the shortcut key goes to the find field or the page.
                 _ => {
                     if self.find_open && self.find_focus {
@@ -398,6 +592,13 @@ impl AppView {
                 }
             }
             "f5" => self.show_toast("Reloading is not part of this spike", false, cx),
+            "f3" if !self.find_open => self.find_open(window, cx),
+            "f3" => {
+                let dir = if md.shift { -1 } else { 1 };
+                if let Some(r) = self.reader() {
+                    r.update(cx, |r, cx| r.find_step(dir, cx));
+                }
+            }
             _ if self.find_open && self.find_focus => {
                 if !self.find_key(e, cx) {
                     return;
@@ -413,6 +614,14 @@ impl AppView {
             }
         }
         cx.notify();
+    }
+
+    fn next_tab(&mut self, dir: isize, cx: &mut Context<Self>) {
+        let n = self.tabs.len() as isize;
+        if n > 1 {
+            let i = (self.active as isize + dir).rem_euclid(n) as usize;
+            self.select_index(i, cx);
+        }
     }
 
     // ---- building blocks -------------------------------------------------------------------
@@ -436,8 +645,12 @@ impl AppView {
         let hovered = self.hover == Some((id, 0));
         let hover_fg = if id == "win-close" { p.bg } else { p.text };
         let fg = if on { p.accent } else if hovered { hover_fg } else { p.muted };
+        let (a11y_name, a11y_keys) = tip.split_once(" (").map_or((tip, None), |(n, k)| (n, Some(k.trim_end_matches(')'))));
         div()
             .id(id)
+            .role(Role::Button)
+            .aria_label(a11y_name)
+            .when_some(a11y_keys, |d, k| d.aria_keyshortcuts(k))
             .track_focus(&fh)
             .flex()
             .flex_none()
@@ -456,7 +669,14 @@ impl AppView {
             }))
             .cursor_pointer()
             .occlude()
-            .hover(move |s| s.bg(c(p.bg_hover)).text_color(c(if on { p.accent } else { p.text })))
+            // One hover style per element: a second call panics in debug builds.
+            .hover(move |s| {
+                if id == "win-close" {
+                    s.bg(c(p.accent)).text_color(c(p.bg))
+                } else {
+                    s.bg(c(p.bg_hover)).text_color(c(if on { p.accent } else { p.text }))
+                }
+            })
             .focus_visible(move |s| s.border_2().border_color(c(p.accent)))
             .tooltip(tooltip(tip, p))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -472,6 +692,8 @@ impl AppView {
         let fh = self.fh(id, cx);
         div()
             .id(id)
+            .role(Role::Button)
+            .aria_label(label)
             .track_focus(&fh)
             .text_color(c(p.accent))
             .text_size(px(12.0))
@@ -489,7 +711,8 @@ impl AppView {
         let p = *self.mode.palette();
         let mac = self.mac;
         let icon_w = if narrow { 30.0 } else { m::ICON_W };
-        let tabs: Vec<(SharedString, SharedString)> = self.tabs.iter().map(|t| (t.name.clone(), t.path.clone())).collect();
+        let tabs: Vec<(TabId, SharedString)> = self.tabs.iter().map(|t| (t.id, t.name.clone())).collect();
+        let moving = self.moving;
         let active = self.active;
         let maximised = false;
 
@@ -510,25 +733,35 @@ impl AppView {
             });
 
         let mut strip = div()
+            .id("tab-strip")
+            .role(Role::TabList)
+            .aria_label("Open files")
+            .track_scroll(&self.tab_scroll)
             .flex()
             .flex_1()
             .min_w_0()
             .items_stretch()
             .self_stretch()
-            .overflow_hidden()
+            .overflow_x_scroll()
             .pt(px(6.0))
             .pb(px(4.0))
             .px(px(6.0));
-        for (i, (name, path)) in tabs.iter().enumerate() {
+        for (i, (tab_id, name)) in tabs.iter().enumerate() {
+            let tab_id = *tab_id;
             let is_active = i == active;
             let tab_hover = self.hover == Some(("tab", i));
             let x_fg = if is_active { p.text_strong } else if tab_hover { p.text } else { p.muted };
             let name = name.clone();
-            let _ = path;
-            let fh = self.fh(Box::leak(format!("tab{i}").into_boxed_str()), cx);
+            let close_label: SharedString = format!("Close tab {name}").into();
+            let fh = self.tab_focus.entry(tab_id).or_insert_with(|| cx.focus_handle().tab_stop(true)).clone();
             strip = strip.child(
                 div()
-                    .id(("tab", i))
+                    .id(("tab", tab_id))
+                    .role(Role::Tab)
+                    .aria_label(name.clone())
+                    .aria_selected(is_active)
+                    .aria_position_in_set(i + 1)
+                    .aria_size_of_set(tabs.len())
                     .group("tab")
                     .track_focus(&fh)
                     .flex()
@@ -555,16 +788,23 @@ impl AppView {
                         }
                         cx.notify();
                     }))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .when(moving == Some(tab_id), |d| d.opacity(0.45))
+                    .on_mouse_down(MouseButton::Left, move |e: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        tab_move::press(tab_id, e.position, window, cx);
+                    })
+                    .on_mouse_up(MouseButton::Middle, cx.listener(move |this, _, _, cx| this.close_tab(tab_id, cx)))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.active = i;
-                        this.current = 0;
-                        cx.notify();
+                        if !tab_move::take_swallow_click(cx) {
+                            this.activate_tab(tab_id, cx);
+                        }
                     }))
                     .child(div().flex_1().min_w_0().truncate().child(name))
                     .child(
                         div()
-                            .id(("tab-x", i))
+                            .id(("tab-x", tab_id))
+                            .role(Role::Button)
+                            .aria_label(close_label)
                             .flex()
                             .flex_none()
                             .items_center()
@@ -578,14 +818,7 @@ impl AppView {
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
-                                if i < this.tabs.len() {
-                                    this.tabs.remove(i);
-                                    if this.active >= this.tabs.len() {
-                                        this.active = this.tabs.len().saturating_sub(1);
-                                    }
-                                    this.current = 0;
-                                }
-                                cx.notify();
+                                this.close_tab(tab_id, cx);
                             }))
                             .child(icon("tab-x", m::TAB_X_SVG, c(x_fg))),
                     ),
@@ -610,7 +843,8 @@ impl AppView {
         strip = strip.child(filler);
 
         let find_open = self.find_open;
-        let b_toc = self.icon_btn("btn-toc", "toc", "Contents (Ctrl+B)", icon_w, m::ICON_H, m::ICON_SVG, self.toc_open, cx, |t, _, _| t.toc_open = !t.toc_open);
+        let b_toc = self.icon_btn("btn-toc", "toc", "Contents (Ctrl+B)", icon_w, m::ICON_H, m::ICON_SVG, self.toc_open, cx, |t, _, _| t.toc_open = !t.toc_open)
+            .aria_toggled(if self.toc_open { Toggled::True } else { Toggled::False });
         let b_open = self.icon_btn("btn-open", "open", "Open (Ctrl+O)", icon_w, m::ICON_H, m::ICON_SVG, false, cx, |t, _, cx| t.prompt_open(cx));
         let b_reload = self.icon_btn("btn-reload", "reload", "Reload (F5)", icon_w, m::ICON_H, m::ICON_SVG, false, cx, |t, _, cx| t.show_toast("Reloading is not part of this spike", false, cx));
         let b_find = self.icon_btn("btn-find", "find", "Find (Ctrl+F)", icon_w, m::ICON_H, m::ICON_SVG, false, cx, move |t, w, cx| {
@@ -629,12 +863,14 @@ impl AppView {
         let b_settings = self.icon_btn("btn-settings", "settings", "Settings", if narrow { 40.0 } else { icon_w }, m::ICON_H, m::ICON_SVG, settings_open, cx, move |t, _, _| {
             t.tools_open = false;
             t.settings_open = !settings_open;
-        });
+        })
+        .aria_expanded(settings_open);
         let tools_open = self.tools_open;
         let b_tools = self.icon_btn("btn-tools", "tools", "More actions", icon_w, m::ICON_H, m::ICON_SVG, false, cx, move |t, _, _| {
             t.settings_open = false;
             t.tools_open = !tools_open;
-        });
+        })
+        .aria_expanded(tools_open);
 
         let wc_w = if narrow { 30.0 } else { m::WINCTL_W };
         let b_min = self.icon_btn("win-minimise", "minimise", "Minimise", wc_w, m::ICON_H, m::WINCTL_SVG, false, cx, |_, w, _| w.minimize_window()).window_control_area(WindowControlArea::Min);
@@ -642,8 +878,7 @@ impl AppView {
         let b_max = self.icon_btn("win-maximise", max_name, if maximised { "Restore" } else { "Maximise" }, wc_w, m::ICON_H, m::WINCTL_SVG, false, cx, |_, w, _| w.zoom_window()).window_control_area(WindowControlArea::Max);
         let b_close = self
             .icon_btn("win-close", "close", "Close window", wc_w, m::ICON_H, m::WINCTL_SVG, false, cx, |_, w, _| w.remove_window())
-            .window_control_area(WindowControlArea::Close)
-            .hover(move |s| s.bg(c(p.accent)).text_color(c(p.bg)));
+            .window_control_area(WindowControlArea::Close);
 
         div()
             .flex()
@@ -671,6 +906,9 @@ impl AppView {
             .when(!mac, |d| {
                 d.child(
                     div()
+                        .id("window-controls")
+                        .role(Role::Group)
+                        .aria_label("Window controls")
                         .flex()
                         .flex_none()
                         .items_center()
@@ -746,6 +984,8 @@ impl AppView {
         };
         let font_for_hit = look.font.clone();
         let shown = self.find_field.clone();
+        let input_fh = self.fh("find-input", cx);
+        let find_value = self.find_field.text.to_string();
         div()
             .absolute()
             .top(px(m::FIND_TOP))
@@ -763,12 +1003,18 @@ impl AppView {
             .occlude()
             .child(
                 div()
+                    .id("find-input")
+                    .role(Role::SearchInput)
+                    .aria_label("Find")
+                    .aria_placeholder("Find")
+                    .aria_value(find_value.clone())
+                    .a11y_synthetic_children(a11y::input_text(find_value))
+                    .track_focus(&input_fh)
                     .flex()
                     .items_center()
                     .w(px(m::FIND_INPUT_W))
                     .min_w_0()
                     .overflow_hidden()
-                    .id("find-input")
                     .h(px(20.0))
                     .cursor(CursorStyle::IBeam)
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this, e: &MouseDownEvent, window, cx| {
@@ -798,6 +1044,10 @@ impl AppView {
             )
             .child(
                 div()
+                    .id("find-count")
+                    .role(Role::Status)
+                    .aria_label(count.clone())
+                    .a11y_synthetic_children(a11y::live_polite)
                     .min_w(px(70.0))
                     .pr(px(6.0))
                     .flex()
@@ -841,7 +1091,13 @@ impl AppView {
                     .text_size(px(12.0))
                     .text_color(c(p.muted))
                     .occlude()
-                    .child("This file shows images from the web. Loading them lets those sites see that you opened it.")
+                    .child(
+                        div()
+                            .id("web-message")
+                            .role(Role::Label)
+                            .aria_value("This file shows images from the web. Loading them lets those sites see that you opened it.")
+                            .child("This file shows images from the web. Loading them lets those sites see that you opened it."),
+                    )
                     .child(div().flex_none().child(load))
                     .child(dismiss),
             )
@@ -857,6 +1113,10 @@ impl AppView {
         Some(
             div().absolute().left_0().right_0().bottom(px(m::TOAST_BOTTOM)).flex().justify_center().child(
                 div()
+                    .id("toast")
+                    .role(Role::Status)
+                    .aria_label(msg.clone())
+                    .a11y_synthetic_children(a11y::live_polite)
                     .flex()
                     .gap(px(6.0))
                     .max_w(px((vw * 0.8).min(vw - 20.0)))
@@ -888,6 +1148,10 @@ impl AppView {
             .text_color(c(p.text))
             .child(
                 div()
+                    .id("empty-title")
+                    .role(Role::Heading)
+                    .aria_level(1)
+                    .aria_label("Open a markdown file, or drop one here.")
                     .my(px(20.0))
                     .text_size(px(20.0))
                     .line_height(relative(1.5))
@@ -897,6 +1161,9 @@ impl AppView {
             .child(
                 div()
                     .id("empty-open")
+                    .role(Role::Button)
+                    .aria_label("Open file")
+                    .aria_keyshortcuts(if self.mac { "Cmd+O" } else { "Ctrl+O" })
                     .track_focus(&fh)
                     .mt(px(6.0))
                     .px(px(16.0))
@@ -927,9 +1194,19 @@ impl AppView {
         let list_h = win_h - m::BAR_HEIGHT;
         let scrollable = n as f32 * m::TOC_ROW > list_h;
         let handle = self.toc_scroll.clone();
+        let row_scroll = self.toc_scroll.clone();
 
         let list = if n == 0 {
-            div().px(px(16.0)).py(px(14.0)).text_size(px(13.0)).text_color(c(p.muted)).child("No headings").into_any_element()
+            div()
+                .id("toc-empty")
+                .role(Role::Label)
+                .aria_value("No headings")
+                .px(px(16.0))
+                .py(px(14.0))
+                .text_size(px(13.0))
+                .text_color(c(p.muted))
+                .child("No headings")
+                .into_any_element()
         } else {
             uniform_list(
                 "toc-list",
@@ -942,8 +1219,23 @@ impl AppView {
                             let h = &headings[i];
                             let l1 = h.level == base;
                             let is_cur = i == current;
+                            let scroll_row = row_scroll.clone();
                             div()
                                 .id(("toc-item", i))
+                                .role(Role::Link)
+                                .aria_label(if h.text.is_empty() { SharedString::from("(untitled)") } else { h.text.clone() })
+                                .aria_level(h.level as usize)
+                                .aria_position_in_set(i + 1)
+                                .aria_size_of_set(n)
+                                .aria_selected(is_cur)
+                                .focusable()
+                                .tab_stop(true)
+                                .focus_visible(move |s| s.border_2().border_color(c(p.accent)))
+                                .on_a11y_action(AccessibleAction::ScrollIntoView, move |_, window, _| {
+                                    // Only on-screen rows exist, so walking a long list relies on this.
+                                    scroll_row.scroll_to_item_strict(i, ScrollStrategy::Center);
+                                    window.refresh();
+                                })
                                 .h(px(m::TOC_ROW))
                                 .w_full()
                                 .line_height(px(m::TOC_ROW))
@@ -990,6 +1282,9 @@ impl AppView {
         // shrinks by 12px while it overflows.
         let bar = scrollable.then(|| self.scrollbar(&handle, list_h, cx));
         div()
+            .id("toc")
+            .role(Role::Navigation)
+            .aria_label("Table of contents")
             .flex()
             .flex_none()
             .w(px(width))
@@ -1075,12 +1370,16 @@ impl AppView {
         let mode = self.mode;
 
         let seg = |this: &mut Self, id: &'static str, a: &'static str, b: &'static str, a_on: bool, cx: &mut Context<Self>, set: fn(&mut Self, bool)| {
-            let mut row = div().flex().border_1().border_color(c(p.border)).overflow_hidden();
+            let group = if id == "seg-theme" { "Theme" } else { "Font" };
+            let mut row = div().id(id).role(Role::RadioGroup).aria_label(group).flex().border_1().border_color(c(p.border)).overflow_hidden();
             for (i, (label, on)) in [(a, a_on), (b, !a_on)].into_iter().enumerate() {
                 let fh = this.fh(if i == 0 { Box::leak(format!("{id}-a").into_boxed_str()) } else { Box::leak(format!("{id}-b").into_boxed_str()) }, cx);
                 row = row.child(
                     div()
                         .id((id, i))
+                        .role(Role::RadioButton)
+                        .aria_label(label)
+                        .aria_toggled(if on { Toggled::True } else { Toggled::False })
                         .track_focus(&fh)
                         .px(px(10.0))
                         .py(px(4.0))
@@ -1103,8 +1402,12 @@ impl AppView {
         let stepper = |this: &mut Self, id: &'static str, key: StepKey, text: String, at_min: bool, at_max: bool, cx: &mut Context<Self>| {
             let mk = |this: &mut Self, sid: &'static str, label: &'static str, dir: f32, disabled: bool, cx: &mut Context<Self>| {
                 let fh = this.fh(sid, cx);
+                let name = key.name().to_lowercase();
                 div()
                     .id(sid)
+                    .role(Role::Button)
+                    .aria_label(format!("{} {name}", if dir < 0.0 { "Decrease" } else { "Increase" }))
+                    .when(disabled, |d| d.a11y_synthetic_children(a11y::disabled))
                     .track_focus(&fh)
                     .px(px(10.0))
                     .py(px(4.0))
@@ -1123,7 +1426,42 @@ impl AppView {
             };
             let minus = mk(this, Box::leak(format!("{id}-minus").into_boxed_str()), "−", -1.0, at_min, cx);
             let plus = mk(this, Box::leak(format!("{id}-plus").into_boxed_str()), "+", 1.0, at_max, cx);
+            let (lo, hi, step) = key.range();
+            let value = this.step_value(key);
+            let (up_h, down_h, set_h) = (cx.entity().downgrade(), cx.entity().downgrade(), cx.entity().downgrade());
             div()
+                .id(id)
+                .role(Role::SpinButton)
+                .aria_label(key.name())
+                .aria_value(text.clone())
+                .aria_numeric_value(value as f64)
+                .aria_min_numeric_value(lo as f64)
+                .aria_max_numeric_value(hi as f64)
+                .aria_numeric_value_step(step as f64)
+                .on_a11y_action(AccessibleAction::Increment, move |_, _, cx| {
+                    up_h.update(cx, |t, cx| {
+                        t.step(key, 1.0);
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .on_a11y_action(AccessibleAction::Decrement, move |_, _, cx| {
+                    down_h.update(cx, |t, cx| {
+                        t.step(key, -1.0);
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .on_a11y_action(AccessibleAction::SetValue, move |data, _, cx| {
+                    if let Some(ActionData::NumericValue(v)) = data {
+                        let v = *v as f32;
+                        set_h.update(cx, |t, cx| {
+                            t.set_step_value(key, v);
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                })
                 .flex()
                 .border_1()
                 .border_color(c(p.border))
@@ -1160,6 +1498,9 @@ impl AppView {
             let fh = this.fh(id, cx);
             div()
                 .id(id)
+                .role(Role::CheckBox)
+                .aria_label(if id == "cb-wrap" { "Wrap code and tables" } else { "Live reload" })
+                .aria_toggled(if on { Toggled::True } else { Toggled::False })
                 .track_focus(&fh)
                 .flex()
                 .items_center()
@@ -1194,6 +1535,9 @@ impl AppView {
         let lic_b = self.licence_link("lic-share", "Share Tech Mono licence", assets::OFL_SHARE_TECH, cx);
 
         div()
+            .id("settings")
+            .role(Role::Group)
+            .aria_label("Settings")
             .absolute()
             .top(px(m::POPOVER_TOP))
             .right(px(m::POPOVER_RIGHT))
@@ -1259,6 +1603,8 @@ impl AppView {
         let fh = self.fh(id, cx);
         div()
             .id(id)
+            .role(Role::Link)
+            .aria_label(label)
             .track_focus(&fh)
             .underline()
             .cursor_pointer()
@@ -1273,7 +1619,7 @@ impl AppView {
     fn licence_dialog(&mut self, vw: f32, vh: f32, text: &'static str, cx: &mut Context<Self>) -> impl IntoElement {
         let p = *self.mode.palette();
         let close = self.link("licence-close", "Close", cx, |t, _, _| t.licence = None);
-        div().absolute().size_full().bg(c(p.bg)).flex().items_center().justify_center().occlude().child(
+        div().id("licence").role(Role::Dialog).aria_label("Licence").absolute().size_full().bg(c(p.bg)).flex().items_center().justify_center().occlude().child(
             div()
                 .flex()
                 .flex_col()
@@ -1288,6 +1634,8 @@ impl AppView {
                 .child(
                     div()
                         .id("licence-text")
+                        .role(Role::Label)
+                        .aria_value(text)
                         .overflow_y_scroll()
                         .font_family(MONO)
                         .text_size(px(13.0))
@@ -1336,6 +1684,17 @@ impl Render for AppView {
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
         let root_focus = self.root_focus.clone();
 
+        if std::mem::take(&mut self.refocus_root) {
+            let root = root_focus.clone();
+            window.defer(cx, move |window, cx| window.focus(&root, cx));
+        }
+        // The window title is how assistive technology tells windows apart.
+        let title = self.tabs.get(self.active).map_or("MD Viewer".to_string(), |t| format!("{} - MD Viewer", t.name));
+        if self.title != title {
+            window.set_window_title(&title);
+            self.title = title;
+        }
+
         let header = self.header(narrow, cx);
         // reader: settings drive the active reader live, and its position drives the outline.
         if let Some(r) = self.reader() {
@@ -1352,7 +1711,12 @@ impl Render for AppView {
             }
         }
         let toc = (has_doc && self.toc_open).then(|| self.toc_panel(vh, if narrow { (vw * 0.36).min(180.0) } else { m::TOC_WIDTH }, cx));
-        let body = if let Some(r) = self.reader() {
+        let sample = self.doc_sample.take();
+        let sample_body = sample.as_ref().map(|d| a11y::doc_sample(d, c(p.text), cx).into_any_element());
+        self.doc_sample = sample;
+        let body = if let Some(sample_body) = sample_body {
+            sample_body
+        } else if let Some(r) = self.reader() {
             r.into_any_element()
         } else if has_doc {
             let tab_name = self.tabs[self.active].name.clone();
@@ -1384,6 +1748,8 @@ impl Render for AppView {
 
         div()
             .id("root")
+            .role(Role::Group)
+            .aria_label("MD Viewer")
             .track_focus(&root_focus)
             .relative()
             .size_full()
@@ -1394,6 +1760,7 @@ impl Render for AppView {
             .font_family(SANS)
             .text_size(px(14.0))
             .line_height(relative(1.4))
+            .capture_key_down(|e: &KeyDownEvent, _, cx| tab_move::capture_key_down(e, cx))
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, w, cx| this.key_down(e, w, cx)))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, w, cx| this.mouse_move(e, w, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, e: &MouseUpEvent, w, cx| this.mouse_up(e, w, cx)))
@@ -1455,6 +1822,11 @@ impl Render for AppView {
             .children(settings)
             .children(tools)
             .children(licence)
+            // tab movement: raw event listeners, and the insertion marker
+            .child(tab_move::event_sink())
+            .children(self.drop_marker.map(|m| {
+                div().absolute().left(px(m.x)).top(px(m.top)).w(px(2.0)).h(px(m.height)).bg(c(p.accent))
+            }))
             // body::after: the 1px perimeter outline, above everything and transparent to the pointer
             .child(div().absolute().size_full().border_1().border_color(c(p.border)))
     }
