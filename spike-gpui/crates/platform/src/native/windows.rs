@@ -1,7 +1,7 @@
 //! Win32: COMPILE-ONLY. This file has never run. See the owner's checklist in the spike report.
 //!
-//! `WindowFromPoint` skips hidden windows. Coordinates are physical if the process is per-monitor
-//! DPI aware, which GPUI's Windows platform requests; that is unconfirmed on a real machine.
+//! `WindowFromPoint` skips hidden windows. Coordinates are physical only if the process is DPI aware.
+//! Nothing in the spike declares that yet (no manifest, no API call), so Windows may virtualise them.
 
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::Graphics::Gdi::{
