@@ -243,6 +243,7 @@ impl DirectXRenderer {
 
     #[inline]
     fn present(&mut self) -> Result<()> {
+        let trace = crate::spike_trace::start(); // spike instrumentation: any wait in `Present`
         let result = unsafe {
             self.resources
                 .as_ref()
@@ -250,6 +251,7 @@ impl DirectXRenderer {
                 .swap_chain
                 .Present(0, DXGI_PRESENT(0))
         };
+        crate::spike_trace::span("present", self.hwnd, 0, trace);
         result.ok().context("Presenting swap chain failed")
     }
 
