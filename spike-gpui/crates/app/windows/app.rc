@@ -1,0 +1,32 @@
+// Resources for md-viewer-gpui.exe. Values mirror wails.json (info) and build/windows.
+#define RT_MANIFEST 24
+1 RT_MANIFEST "app.manifest"
+// Icon id 1 is the one Explorer shows for the file.
+1 ICON "../../../../build/windows/icon.ico"
+
+1 VERSIONINFO
+FILEVERSION 0,2,6,0
+PRODUCTVERSION 0,2,6,0
+FILEOS 0x4
+FILETYPE 0x1
+{
+  BLOCK "StringFileInfo"
+  {
+    BLOCK "040904B0"
+    {
+      VALUE "CompanyName", "penguin97040"
+      VALUE "FileDescription", "MD Viewer"
+      VALUE "FileVersion", "0.2.6"
+      VALUE "InternalName", "md-viewer-gpui"
+      VALUE "LegalCopyright", "MIT licence"
+      VALUE "OriginalFilename", "md-viewer-gpui.exe"
+      VALUE "ProductName", "MD Viewer"
+      VALUE "ProductVersion", "0.2.6"
+      VALUE "Comments", "A small, fast markdown viewer"
+    }
+  }
+  BLOCK "VarFileInfo"
+  {
+    VALUE "Translation", 0x409, 0x4B0
+  }
+}

@@ -4,6 +4,8 @@ version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
+build = "build.rs"
+
 [dependencies]
 gpui.workspace = true
 anyhow.workspace = true
@@ -15,3 +17,6 @@ mdv-platform.workspace = true
 mdv-print.workspace = true
 raw-window-handle.workspace = true
 async-channel.workspace = true
+
+[build-dependencies]
+embed-resource.workspace = true

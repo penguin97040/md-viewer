@@ -3262,6 +3262,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-channel",
+ "embed-resource",
  "gpui-pre",
  "gpui-pre-platform",
  "mdv-content",
