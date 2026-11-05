@@ -6,7 +6,7 @@ use std::cell::RefCell;
 
 use x11rb::connection::Connection;
 use x11rb::protocol::randr::ConnectionExt as _;
-use x11rb::protocol::xproto::{AtomEnum, ConfigureWindowAux, ConnectionExt as _, MapState, Window};
+use x11rb::protocol::xproto::{AtomEnum, ConfigureWindowAux, ConnectionExt as _, MapState, StackMode, Window};
 use x11rb::rust_connection::RustConnection;
 
 use super::{Hit, NativeWindow};
@@ -141,6 +141,27 @@ pub fn work_area_at(at: DesktopPoint) -> Option<DesktopRect> {
             (None, m) => m,
         }
     })
+}
+
+pub fn show_window(window: Window, rect: DesktopRect) {
+    with_connection(|conn, _| {
+        let aux = ConfigureWindowAux::new()
+            .x(rect.x)
+            .y(rect.y)
+            .width(rect.width.max(1) as u32)
+            .height(rect.height.max(1) as u32)
+            .stack_mode(StackMode::ABOVE);
+        conn.configure_window(window, &aux).ok()?;
+        conn.map_window(window).ok()?;
+        conn.flush().ok()
+    });
+}
+
+pub fn hide_window(window: Window) {
+    with_connection(|conn, _| {
+        conn.unmap_window(window).ok()?;
+        conn.flush().ok()
+    });
 }
 
 pub fn place_window(window: Window, rect: DesktopRect) {

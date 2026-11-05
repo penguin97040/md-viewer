@@ -150,7 +150,32 @@ pub fn prepare_ghost(window: NativeWindow) {
     }
 }
 
-/// Moves and sizes the drag label without activating it or changing its stacking, in physical
+/// Sizes, places and shows the hidden drag label without activating it, in physical pixels. It calls
+/// back into the window procedure at once, so on Windows it must run with App not borrowed.
+pub fn show_ghost(window: NativeWindow, rect: DesktopRect) {
+    match window {
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        NativeWindow::X11(id) => x11::show_window(id, rect),
+        #[cfg(target_os = "windows")]
+        NativeWindow::Win32(h) => windows::show_ghost(h, rect),
+        _ => {
+            let _ = rect;
+        }
+    }
+}
+
+/// Hides the drag label until the next drag.
+pub fn hide_ghost(window: NativeWindow) {
+    match window {
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        NativeWindow::X11(id) => x11::hide_window(id),
+        #[cfg(target_os = "windows")]
+        NativeWindow::Win32(h) => windows::hide_ghost(h),
+        _ => {}
+    }
+}
+
+/// Moves the drag label without activating it or changing its size or stacking, in physical
 /// pixels. On Windows it also keeps the window topmost.
 pub fn place_ghost(window: NativeWindow, rect: DesktopRect) {
     match window {

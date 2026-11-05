@@ -143,6 +143,7 @@ fn main() {
         }, cx)
         .unwrap();
         timing::log("window_created");
+        tab_move::prepare_ghost_soon(cx);
         if let Some(owner) = owner {
             tab_move::serve_launches(owner, cx);
         }

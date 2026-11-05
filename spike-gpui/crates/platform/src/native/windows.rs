@@ -10,8 +10,8 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetAncestor, GetWindow, GetWindowLongPtrW, GetWindowRect, IsIconic, IsWindowVisible, SetWindowLongPtrW,
-    SetWindowPos, WindowFromPoint, GA_ROOT, GWL_EXSTYLE, GW_HWNDNEXT, HWND_TOPMOST, SWP_NOACTIVATE,
-    SWP_SHOWWINDOW, WS_EX_NOACTIVATE,
+    SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT, GWL_EXSTYLE, GW_HWNDNEXT, HWND_TOPMOST,
+    SWP_NOACTIVATE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, WS_EX_NOACTIVATE,
 };
 
 use super::{Hit, NativeWindow};
@@ -63,15 +63,23 @@ pub fn prepare_ghost(hwnd: isize) {
 pub fn place_ghost(hwnd: isize, r: DesktopRect) {
     // SAFETY: a stale handle makes the call fail, which is ignored.
     unsafe {
-        let _ = SetWindowPos(
-            HWND(hwnd as *mut _),
-            Some(HWND_TOPMOST),
-            r.x,
-            r.y,
-            r.width,
-            r.height,
-            SWP_NOACTIVATE | SWP_SHOWWINDOW,
-        );
+        let _ = SetWindowPos(HWND(hwnd as *mut _), Some(HWND_TOPMOST), r.x, r.y, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE);
+    }
+}
+
+pub fn show_ghost(hwnd: isize, r: DesktopRect) {
+    let hwnd = HWND(hwnd as *mut _);
+    // SAFETY: a stale handle makes both calls fail, which is ignored.
+    unsafe {
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), r.x, r.y, r.width, r.height, SWP_NOACTIVATE);
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+}
+
+pub fn hide_ghost(hwnd: isize) {
+    // SAFETY: a stale handle makes the call fail, which is ignored.
+    unsafe {
+        let _ = ShowWindow(HWND(hwnd as *mut _), SW_HIDE);
     }
 }
 
