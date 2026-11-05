@@ -192,6 +192,8 @@ pub enum InlineStyle {
     Small,
     /// `<tt>`, `<samp>` and `<var>`: monospaced with no code box.
     Mono,
+    /// A raw `<code>` element, which can hold other inline elements.
+    Code,
 }
 
 /// Where a link goes. Anything not listed (`javascript:`, `file:` and so on) is not a link: its
@@ -328,6 +330,8 @@ pub struct TableRow {
 pub struct TableCell {
     pub content: Vec<Inline>,
     pub text: ByteSpan,
+    /// An `align` attribute from raw HTML. The delimiter row's alignment is in [`Table::aligns`].
+    pub align: Align,
 }
 
 #[derive(Clone, Debug, Default)]
