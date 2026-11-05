@@ -944,7 +944,14 @@ impl DirectXRenderPipelines {
     /// that the bytecode is shared (see `shader_resources::RawShaderBytes`).
     pub fn new(device: &ID3D11Device) -> Result<Self> {
         let started = std::time::Instant::now();
-        let built = Self::build(device);
+        let built = match Self::build(device) {
+            // The device refused bytecode read from disk: compile, and overwrite what is there.
+            Err(err) if shader_resources::forget_disk_shaders() => {
+                log::warn!("Stored shaders refused, compiling: {err:#}");
+                Self::build(device)
+            }
+            built => built,
+        };
         spike_timing::record_pipelines(started.elapsed());
         built
     }
@@ -1727,6 +1734,11 @@ pub(crate) mod spike_timing {
         );
     }
 
+    pub(crate) fn record_disk_shader(entry: &str) {
+        let Some(path) = std::env::var_os("MDV_TIMING") else { return };
+        append(&path, &format!("shader={entry} from_disk=1"));
+    }
+
     pub(crate) fn record_shader(entry: &str, took: Duration) {
         let Some(path) = std::env::var_os("MDV_TIMING") else { return };
         COMPILES.fetch_add(1, Ordering::Relaxed);
@@ -1755,6 +1767,8 @@ pub(crate) mod spike_timing {
 
 pub(crate) mod shader_resources {
     use std::marker::PhantomData;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     use anyhow::Result;
@@ -1868,27 +1882,78 @@ pub(crate) mod shader_resources {
         }
     }
 
+    static READ_FROM_DISK: AtomicBool = AtomicBool::new(false);
+    static IGNORE_DISK: AtomicBool = AtomicBool::new(false);
+
+    /// `MDV_NO_SHADER_DISK` turns the store off, to compare a cold start.
+    fn disk_dir() -> Option<PathBuf> {
+        if std::env::var_os("MDV_NO_SHADER_DISK").is_some() {
+            return None;
+        }
+        let base = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
+        Some(base.join("md-viewer").join("shader-cache"))
+    }
+
+    /// Drops everything cached if any of it came from disk, so the caller can retry on a fresh
+    /// compile. False if there is nothing to retry, which ends the retries as well.
+    pub(super) fn forget_disk_shaders() -> bool {
+        let mut cache = BYTECODE.lock().unwrap_or_else(|e| e.into_inner());
+        IGNORE_DISK.store(true, Ordering::Relaxed);
+        if !READ_FROM_DISK.swap(false, Ordering::Relaxed) {
+            return false;
+        }
+        cache.clear();
+        true
+    }
+
     #[cfg(all())]
     fn load_or_compile(module: ShaderModule, target: ShaderTarget) -> Result<Arc<[u8]>> {
+        // The emoji pair is built with the text system, which has no retry, and is the small file.
+        let stored = !matches!(module, ShaderModule::EmojiRasterization);
+        let dir = disk_dir().filter(|_| stored);
+        let name = format!("{}_{target:?}", module.as_str());
+        let key = crate::shader_disk::hash(&[
+            b"1",
+            name.as_bytes(),
+            &D3DCOMPILE_OPTIMIZATION_LEVEL3.to_le_bytes(),
+            shader_source(module).as_bytes(),
+        ]);
+        if let Some(dir) = dir.as_ref().filter(|_| !IGNORE_DISK.load(Ordering::Relaxed)) {
+            if let Some(bytes) = crate::shader_disk::read(dir, key) {
+                READ_FROM_DISK.store(true, Ordering::Relaxed);
+                spike_timing::record_disk_shader(&name);
+                return Ok(Arc::from(bytes));
+            }
+        }
         let blob = build_shader_blob(module, target)?;
         let bytes = unsafe {
             std::slice::from_raw_parts(blob.GetBufferPointer() as *const u8, blob.GetBufferSize())
         };
+        if let Some(dir) = &dir {
+            crate::shader_disk::write(dir, key, bytes);
+        }
         Ok(Arc::from(bytes))
     }
 
     #[cfg(all())]
-    fn build_shader_blob(entry: ShaderModule, target: ShaderTarget) -> Result<ID3DBlob> {
-        unsafe {
-            let shader_name = if matches!(entry, ShaderModule::EmojiRasterization) {
-                "color_text_raster.hlsl"
-            } else {
-                "shaders.hlsl"
-            };
+    fn shader_source(module: ShaderModule) -> String {
+        if matches!(module, ShaderModule::EmojiRasterization) {
+            include_str!("color_text_raster.hlsl")
+        } else {
+            include_str!("shaders.hlsl")
+        }
+        .replace(
+            "#include \"alpha_correction.hlsl\"",
+            include_str!("alpha_correction.hlsl"),
+        )
+    }
 
+    #[cfg(all())]
+    fn build_shader_blob(module: ShaderModule, target: ShaderTarget) -> Result<ID3DBlob> {
+        unsafe {
             let entry = format!(
                 "{}_{}\0",
-                entry.as_str(),
+                module.as_str(),
                 match target {
                     ShaderTarget::Vertex => "vertex",
                     ShaderTarget::Fragment => "fragment",
@@ -1903,15 +1968,7 @@ pub(crate) mod shader_resources {
             // because cross-compiling from Linux has no fxc.exe to precompile the shaders.
             let mut compile_blob = None;
             let mut error_blob = None;
-            let source: String = if shader_name == "color_text_raster.hlsl" {
-                include_str!("color_text_raster.hlsl")
-            } else {
-                include_str!("shaders.hlsl")
-            }
-            .replace(
-                "#include \"alpha_correction.hlsl\"",
-                include_str!("alpha_correction.hlsl"),
-            );
+            let source = shader_source(module);
 
             let entry_point = PCSTR::from_raw(entry.as_ptr());
             let target_cstr = PCSTR::from_raw(target.as_ptr());
