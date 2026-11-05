@@ -7,12 +7,13 @@ use std::time::Instant;
 use gpui::{
     canvas, div, point, prelude::*, px, relative, uniform_list, Bounds, Context, CursorStyle,
     Decorations, Div, FocusHandle, FontWeight, HitboxBehavior, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ResizeEdge,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ResizeEdge, ScrollHandle,
     SharedString, Stateful, UniformListScrollHandle, Window, WindowControlArea,
 };
 use mdv_theme::{metrics as m, Mode};
 
 use crate::assets;
+use crate::tab_move::{self, TabId, TabState};
 use crate::ui::{c, icon, spaced, tabular, tooltip, transparent, up};
 
 pub const VERSION: &str = "0.2.6";
@@ -27,9 +28,26 @@ pub struct Heading {
 }
 
 pub struct TabData {
+    pub id: TabId,
     pub name: SharedString,
     pub path: SharedString,
     pub headings: std::rc::Rc<Vec<Heading>>,
+    /// Follows the tab between windows. Add per-tab reader state here, not to `AppView`.
+    pub state: TabState,
+}
+
+impl TabData {
+    pub fn new(name: SharedString, path: SharedString, headings: std::rc::Rc<Vec<Heading>>) -> Self {
+        Self { id: tab_move::next_tab_id(), name, path, headings, state: TabState::default() }
+    }
+}
+
+/// The insertion marker on a strip, in window coordinates (`.tab-insertion`).
+#[derive(Clone, Copy)]
+pub struct DropMarker {
+    pub x: f32,
+    pub top: f32,
+    pub height: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -85,6 +103,11 @@ pub struct AppView {
     pub perf: bool,
     pub started: Instant,
     first_render_logged: bool,
+    // tab movement: see tab_move.rs
+    pub tab_scroll: ScrollHandle,
+    pub drop_marker: Option<DropMarker>,
+    pub moving: Option<TabId>,
+    tab_focus: HashMap<TabId, FocusHandle>,
 }
 
 impl AppView {
@@ -114,6 +137,100 @@ impl AppView {
             perf: std::env::var("MDV_PERF").is_ok(),
             started: Instant::now(),
             first_render_logged: false,
+            tab_scroll: ScrollHandle::new(),
+            drop_marker: None,
+            moving: None,
+            tab_focus: HashMap::new(),
+        }
+    }
+
+    // ---- tab state (tab movement: see tab_move.rs) -------------------------------------------
+
+    /// Copies the view's per-tab fields into the active tab, so they travel with it.
+    fn save_active_state(&mut self) {
+        let (current, offset, web) = (self.current, self.toc_scroll.0.borrow().base_handle.offset().y, self.web_bar);
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.state.current_heading = current;
+            tab.state.toc_offset = offset;
+            tab.state.web_bar = web;
+        }
+    }
+
+    /// The reverse of `save_active_state`, after `active` changed.
+    fn load_active_state(&mut self) {
+        let state = self.tabs.get(self.active).map(|t| (t.state.current_heading, t.state.toc_offset, t.state.web_bar));
+        let (current, offset, web) = state.unwrap_or((0, px(0.0), false));
+        self.current = current;
+        self.web_bar = web;
+        let handle = self.toc_scroll.0.borrow().base_handle.clone();
+        let mut o = handle.offset();
+        o.y = offset;
+        handle.set_offset(o);
+    }
+
+    fn select_index(&mut self, i: usize, cx: &mut Context<Self>) {
+        if i < self.tabs.len() && i != self.active {
+            self.save_active_state();
+            self.active = i;
+            self.load_active_state();
+            self.tab_scroll.scroll_to_item(i);
+            cx.notify();
+        }
+    }
+
+    pub fn activate_tab(&mut self, id: TabId, cx: &mut Context<Self>) {
+        if let Some(i) = self.tabs.iter().position(|t| t.id == id) {
+            self.select_index(i, cx);
+        }
+    }
+
+    /// Moves a tab within this strip. `at` is an insertion index with the tab still in place. The
+    /// same tab stays active and the strip's order is the keyboard order.
+    pub fn reorder_tab(&mut self, id: TabId, at: usize) -> bool {
+        let Some(from) = self.tabs.iter().position(|t| t.id == id) else { return false };
+        let active = self.tabs.get(self.active).map(|t| t.id);
+        let moved = mdv_platform::order::reorder(&mut self.tabs, from, at);
+        if let Some(i) = active.and_then(|a| self.tabs.iter().position(|t| t.id == a)) {
+            self.active = i;
+        }
+        moved
+    }
+
+    /// Takes a tab out of this strip for moving elsewhere, with its current state.
+    pub fn take_tab(&mut self, id: TabId, cx: &mut Context<Self>) -> Option<TabData> {
+        self.save_active_state();
+        let i = self.tabs.iter().position(|t| t.id == id)?;
+        let data = self.tabs.remove(i);
+        self.tab_focus.remove(&id);
+        self.active = mdv_platform::order::active_after_removal(self.active, i, self.tabs.len());
+        self.load_active_state();
+        cx.notify();
+        Some(data)
+    }
+
+    /// Adds a tab at insertion index `at` and makes it active, restoring its state.
+    pub fn insert_tab(&mut self, data: TabData, at: usize, cx: &mut Context<Self>) {
+        self.save_active_state();
+        let at = at.min(self.tabs.len());
+        self.tabs.insert(at, data);
+        self.active = at;
+        self.load_active_state();
+        self.tab_scroll.scroll_to_item(at);
+        cx.notify();
+    }
+
+    fn close_tab(&mut self, id: TabId, cx: &mut Context<Self>) {
+        if let Some(i) = self.tabs.iter().position(|t| t.id == id) {
+            let was_active = i == self.active;
+            if !was_active {
+                self.save_active_state();
+            }
+            self.tabs.remove(i);
+            self.tab_focus.remove(&id);
+            self.active = mdv_platform::order::active_after_removal(self.active, i, self.tabs.len());
+            self.load_active_state();
+            cx.notify();
+            cx.defer(|cx| tab_move::log_state("close-tab", "", cx));
         }
     }
 
@@ -181,7 +298,25 @@ impl AppView {
                     self.close_popups();
                 }
                 "b" => self.toc_open = !self.toc_open,
-                "o" => self.show_toast("Opening files is not part of this spike", false, cx),
+                "o" => {
+                    if !tab_move::open_next_from_queue(self, cx) {
+                        self.show_toast("Opening files is not part of this spike", false, cx)
+                    }
+                }
+                // tab keys: order follows the strip (README shortcut table)
+                "w" => {
+                    if let Some(id) = self.tabs.get(self.active).map(|t| t.id) {
+                        self.close_tab(id, cx);
+                    }
+                }
+                "tab" if md.control => self.next_tab(if md.shift { -1 } else { 1 }, cx),
+                "pagedown" => self.next_tab(1, cx),
+                "pageup" => self.next_tab(-1, cx),
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" if !md.shift => {
+                    let n = self.tabs.len();
+                    let i = if k == "9" { n.saturating_sub(1) } else { k.parse::<usize>().unwrap_or(1) - 1 };
+                    self.select_index(i, cx);
+                }
                 "p" => self.show_toast("Printing is not part of this spike", false, cx),
                 _ => return,
             }
@@ -230,6 +365,14 @@ impl AppView {
             _ => return,
         }
         cx.notify();
+    }
+
+    fn next_tab(&mut self, dir: isize, cx: &mut Context<Self>) {
+        let n = self.tabs.len() as isize;
+        if n > 1 {
+            let i = (self.active as isize + dir).rem_euclid(n) as usize;
+            self.select_index(i, cx);
+        }
     }
 
     // ---- building blocks -------------------------------------------------------------------
@@ -305,7 +448,8 @@ impl AppView {
         let p = *self.mode.palette();
         let mac = self.mac;
         let icon_w = if narrow { 30.0 } else { m::ICON_W };
-        let tabs: Vec<(SharedString, SharedString)> = self.tabs.iter().map(|t| (t.name.clone(), t.path.clone())).collect();
+        let tabs: Vec<(TabId, SharedString)> = self.tabs.iter().map(|t| (t.id, t.name.clone())).collect();
+        let moving = self.moving;
         let active = self.active;
         let maximised = false;
 
@@ -326,25 +470,27 @@ impl AppView {
             });
 
         let mut strip = div()
+            .id("tab-strip")
+            .track_scroll(&self.tab_scroll)
             .flex()
             .flex_1()
             .min_w_0()
             .items_stretch()
             .self_stretch()
-            .overflow_hidden()
+            .overflow_x_scroll()
             .pt(px(6.0))
             .pb(px(4.0))
             .px(px(6.0));
-        for (i, (name, path)) in tabs.iter().enumerate() {
+        for (i, (tab_id, name)) in tabs.iter().enumerate() {
+            let tab_id = *tab_id;
             let is_active = i == active;
             let tab_hover = self.hover == Some(("tab", i));
             let x_fg = if is_active { p.text_strong } else if tab_hover { p.text } else { p.muted };
             let name = name.clone();
-            let _ = path;
-            let fh = self.fh(Box::leak(format!("tab{i}").into_boxed_str()), cx);
+            let fh = self.tab_focus.entry(tab_id).or_insert_with(|| cx.focus_handle().tab_stop(true)).clone();
             strip = strip.child(
                 div()
-                    .id(("tab", i))
+                    .id(("tab", tab_id))
                     .group("tab")
                     .track_focus(&fh)
                     .flex()
@@ -370,16 +516,21 @@ impl AppView {
                         }
                         cx.notify();
                     }))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .when(moving == Some(tab_id), |d| d.opacity(0.45))
+                    .on_mouse_down(MouseButton::Left, move |e: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        tab_move::press(tab_id, e.position, window, cx);
+                    })
+                    .on_mouse_up(MouseButton::Middle, cx.listener(move |this, _, _, cx| this.close_tab(tab_id, cx)))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.active = i;
-                        this.current = 0;
-                        cx.notify();
+                        if !tab_move::take_swallow_click(cx) {
+                            this.activate_tab(tab_id, cx);
+                        }
                     }))
                     .child(div().flex_1().min_w_0().truncate().child(name))
                     .child(
                         div()
-                            .id(("tab-x", i))
+                            .id(("tab-x", tab_id))
                             .flex()
                             .flex_none()
                             .items_center()
@@ -393,14 +544,7 @@ impl AppView {
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
-                                if i < this.tabs.len() {
-                                    this.tabs.remove(i);
-                                    if this.active >= this.tabs.len() {
-                                        this.active = this.tabs.len().saturating_sub(1);
-                                    }
-                                    this.current = 0;
-                                }
-                                cx.notify();
+                                this.close_tab(tab_id, cx);
                             }))
                             .child(icon("tab-x", m::TAB_X_SVG, c(x_fg))),
                     ),
@@ -1153,6 +1297,7 @@ impl Render for AppView {
             .font_family(SANS)
             .text_size(px(14.0))
             .line_height(relative(1.4))
+            .capture_key_down(|e: &KeyDownEvent, _, cx| tab_move::capture_key_down(e, cx))
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, w, cx| this.key_down(e, w, cx)))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, w, cx| this.mouse_move(e, w, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, e: &MouseUpEvent, w, cx| this.mouse_up(e, w, cx)))
@@ -1213,6 +1358,11 @@ impl Render for AppView {
             .children(settings)
             .children(tools)
             .children(licence)
+            // tab movement: raw event listeners, and the insertion marker
+            .child(tab_move::event_sink())
+            .children(self.drop_marker.map(|m| {
+                div().absolute().left(px(m.x)).top(px(m.top)).w(px(2.0)).h(px(m.height)).bg(c(p.accent))
+            }))
             // body::after: the 1px perimeter outline, above everything and transparent to the pointer
             .child(div().absolute().size_full().border_1().border_color(c(p.border)))
     }

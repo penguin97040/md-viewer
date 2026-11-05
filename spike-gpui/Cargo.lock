@@ -2930,6 +2930,7 @@ dependencies = [
  "mdv-platform",
  "mdv-reader",
  "mdv-theme",
+ "raw-window-handle",
 ]
 
 [[package]]
@@ -2944,6 +2945,9 @@ name = "mdv-platform"
 version = "0.0.0"
 dependencies = [
  "mdv-theme",
+ "raw-window-handle",
+ "windows 0.62.2",
+ "x11rb",
 ]
 
 [[package]]

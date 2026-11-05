@@ -18,3 +18,6 @@ mdv-theme = { path = "crates/theme" }
 mdv-reader = { path = "crates/reader" }
 mdv-content = { path = "crates/content" }
 mdv-platform = { path = "crates/platform" }
+raw-window-handle = "=0.6.2"
+x11rb = { version = "=0.13.2", default-features = false, features = ["randr"] }
+windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
