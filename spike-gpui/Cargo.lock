@@ -3253,6 +3253,7 @@ version = "0.0.0"
 dependencies = [
  "gpui-pre",
  "image",
+ "mdv-content",
  "mdv-theme",
  "memchr",
  "pulldown-cmark",

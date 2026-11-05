@@ -5,13 +5,16 @@ edition.workspace = true
 publish.workspace = true
 
 [features]
-default = ["ui"]
+default = ["ui", "merman"]
 # The on-screen view. Without it the crate is the document model and parser alone, with no GPUI.
-ui = ["dep:gpui"]
+ui = ["dep:gpui", "dep:mdv-content"]
+# Draw diagrams with merman instead of mermaid-rs-renderer (the content crate picks one at build time).
+merman = ["mdv-content?/merman"]
 
 [dependencies]
 mdv-theme.workspace = true
 gpui = { workspace = true, optional = true }
+mdv-content = { workspace = true, optional = true }
 pulldown-cmark.workspace = true
 syntect.workspace = true
 rayon.workspace = true

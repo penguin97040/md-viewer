@@ -109,6 +109,13 @@ pub trait Assets {
     fn mermaid(&self, _src: &str) -> Option<AssetBox> {
         None
     }
+    /// Why a formula could not be drawn, once that is known.
+    fn math_error(&self, _src: &str, _display: bool, _font_size: f32) -> Option<String> {
+        None
+    }
+    fn mermaid_error(&self, _src: &str) -> Option<String> {
+        None
+    }
     fn image(&self, _source: &ImageSource) -> ImageState {
         ImageState::Failed
     }
@@ -298,6 +305,10 @@ pub struct ChunkLayout {
     pub hits: Vec<Hit>,
     pub links: Vec<LinkTarget>,
     pub glyphs: usize,
+    /// Print only: vertical ranges that should not be split across pages (`break-inside: avoid`).
+    pub keep: Vec<(f32, f32)>,
+    /// Print only: headings' vertical ranges (`break-after: avoid`).
+    pub heads: Vec<(f32, f32)>,
 }
 
 impl ChunkLayout {
@@ -461,6 +472,8 @@ pub struct Layouter<'a> {
     st: &'a ChunkState,
     shaper: &'a mut dyn Shaper,
     assets: &'a dyn Assets,
+    /// Laying out for paper: no copy buttons, wide assets shrink, page-break ranges are recorded.
+    print: bool,
     out: ChunkLayout,
     layer: usize,
     y: f32,
@@ -473,13 +486,27 @@ pub struct Layouter<'a> {
 /// Lays out one chunk. `first` and `last` say whether it starts or ends the document, which is
 /// where the document padding goes.
 pub fn layout_chunk(c: &ChunkContent, o: &Options, st: &ChunkState, first: bool, last: bool, shaper: &mut dyn Shaper, assets: &dyn Assets) -> ChunkLayout {
+    layout_impl(c, o, *o.palette(), false, st, first, last, shaper, assets)
+}
+
+/// The same layout for paper: `palette` replaces the mode's colours, there are no copy buttons,
+/// wide maths and diagrams shrink to the width, and `keep` and `heads` list where pages may not
+/// break.
+#[allow(clippy::too_many_arguments)]
+pub fn layout_chunk_print(c: &ChunkContent, o: &Options, palette: Palette, st: &ChunkState, first: bool, last: bool, shaper: &mut dyn Shaper, assets: &dyn Assets) -> ChunkLayout {
+    layout_impl(c, o, palette, true, st, first, last, shaper, assets)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_impl(c: &ChunkContent, o: &Options, palette: Palette, print: bool, st: &ChunkState, first: bool, last: bool, shaper: &mut dyn Shaper, assets: &dyn Assets) -> ChunkLayout {
     let mut l = Layouter {
         c,
         o: *o,
-        p: *o.palette(),
+        p: palette,
         st,
         shaper,
         assets,
+        print,
         out: ChunkLayout { layers: vec![Layer::default()], ..Default::default() },
         layer: 0,
         y: 0.0,
@@ -521,6 +548,12 @@ pub fn estimate(bytes: u32, lines: u32, o: &Options) -> f32 {
 }
 
 impl Layouter<'_> {
+    fn keep(&mut self, top: f32, bottom: f32) {
+        if self.print && bottom > top {
+            self.out.keep.push((top, bottom));
+        }
+    }
+
     fn flush(&mut self) {
         self.y += self.pending;
         self.pending = 0.0;
@@ -573,6 +606,7 @@ impl Layouter<'_> {
                 self.y += pad_y;
                 let h = self.y - top;
                 self.rect(RectItem { rect: Rect::new(ctx.x, top, 4.0, h), fill: Some(self.p.accent), border: None, radius: 0.0 });
+                self.keep(top, self.y);
                 bottom(self, ctx.size);
             }
             Block::List(l) => {
@@ -644,6 +678,7 @@ impl Layouter<'_> {
         if level == 1 && ctx.align == Align::Default {
             hc.align = Align::Centre;
         }
+        let head_top = self.y;
         let prep = self.prepare(content, hc);
         let lines = balance(&prep, hc.w, self.c);
         let (tb, h) = self.place(prep, &lines, hc, hc.x, self.y, hc.w, true);
@@ -658,6 +693,9 @@ impl Layouter<'_> {
             self.y += pad;
             self.rect(RectItem { rect: Rect::new(ctx.x, self.y, ctx.w, 1.0), fill: Some(self.p.border), border: None, radius: 0.0 });
             self.y += 1.0;
+        }
+        if self.print {
+            self.out.heads.push((head_top, self.y));
         }
         if !no_bottom {
             self.margin(0.6 * size);
@@ -957,15 +995,20 @@ impl Layouter<'_> {
                 }
                 Inline::Image(img) => self.flatten_image(img, st, out),
                 Inline::Math { src, text } => match self.assets.math(src, false, st.size) {
-                    Some(a) => out.push(Run::Atom(AtomDraw::Asset { key: a.key, w: a.width, h: a.height }, a.height, a.height - a.baseline, text.start)),
+                    Some(a) => out.push(Run::Atom(AtomDraw::Asset { key: a.key, w: a.width, h: a.height }, a.baseline, a.height - a.baseline, text.start)),
                     None => {
                         let mut n = st;
                         n.family = Family::Mono;
                         n.size = st.size * 0.87;
-                        n.color = self.p.muted;
-                        n.decor = Decor::MathPlaceholder;
-                        n.pad_l = 0.2 * n.size;
-                        n.pad_r = n.pad_l;
+                        if self.assets.math_error(src, false, st.size).is_some() {
+                            // KaTeX with throwOnError off leaves the source, coloured.
+                            n.color = self.p.accent;
+                        } else {
+                            n.color = self.p.muted;
+                            n.decor = Decor::MathPlaceholder;
+                            n.pad_l = 0.2 * n.size;
+                            n.pad_r = n.pad_l;
+                        }
                         out.push(Run::Text(*text, n));
                     }
                 },
@@ -1303,8 +1346,9 @@ impl Layouter<'_> {
     fn code(&mut self, cb: &CodeBlock, ctx: Ctx, no_bottom: bool) {
         self.flush();
         let size = ctx.size * 0.87;
-        let top_pad = if cb.copyable { 2.8 * size } else { 0.9 * size };
-        self.pre_box(cb.text, &cb.tokens, cb.span.text.start, cb.copyable, None, size, top_pad, ctx);
+        let copy = cb.copyable && !self.print;
+        let top_pad = if copy { 2.8 * size } else { 0.9 * size };
+        self.pre_box(cb.text, &cb.tokens, cb.span.text.start, copy, None, size, top_pad, ctx);
         if !no_bottom {
             self.margin(ctx.size * 0.87);
         }
@@ -1314,7 +1358,10 @@ impl Layouter<'_> {
     fn mermaid(&mut self, src: &str, span: Span, ctx: Ctx, no_bottom: bool) {
         self.flush();
         if let Some(a) = self.assets.mermaid(src) {
-            self.asset_block(a, ctx);
+            let at = span.text.start;
+            self.asset_block(a, ctx, true, ByteSpan::new(at, at + src.len() as u32), None);
+        } else if let Some(msg) = self.assets.mermaid_error(src) {
+            self.error_block(&format!("Diagram error: {msg}"), ctx);
         } else {
             let size = ctx.size * 0.87;
             let text = ByteSpan::new(span.text.start, span.text.start + src.len() as u32);
@@ -1329,7 +1376,11 @@ impl Layouter<'_> {
     fn math_block(&mut self, src: &str, display: bool, span: Span, ctx: Ctx, no_bottom: bool) {
         self.flush();
         if let Some(a) = self.assets.math(src, display, ctx.size) {
-            self.asset_block(a, ctx);
+            let at = span.text.start;
+            // `.math.display { overflow-x: auto }`: wide formulas scroll.
+            self.asset_block(a, ctx, false, ByteSpan::new(at, at + src.len() as u32), Some(at));
+        } else if let Some(msg) = self.assets.math_error(src, display, ctx.size) {
+            self.error_block(&format!("Math error: {msg}"), ctx);
         } else {
             // The placeholder: its source in mono in a dashed box, centred like the real thing.
             let mut c = ctx;
@@ -1356,21 +1407,91 @@ impl Layouter<'_> {
         }
     }
 
-    fn asset_block(&mut self, a: AssetBox, ctx: Ctx) {
-        let w = a.width.min(ctx.w);
-        let h = if a.width > 0.0 { a.height * w / a.width } else { a.height };
-        let x = ctx.x + (ctx.w - w) / 2.0;
+    /// A drawn asset in its own block, centred. `shrink` is `max-width: 100%`; without it a wide
+    /// asset gets a horizontal scroll area keyed `scroll_key`. `src` makes it selectable as its
+    /// source text.
+    fn asset_block(&mut self, a: AssetBox, ctx: Ctx, shrink: bool, src: ByteSpan, scroll_key: Option<u32>) {
+        let shrink = shrink || self.print;
+        let overflow = !shrink && a.width > ctx.w + 0.5 && scroll_key.is_some();
+        let w = if shrink { a.width.min(ctx.w) } else { a.width };
+        let h = if shrink && a.width > 0.0 { a.height * w / a.width } else { a.height };
+        let x = if overflow { ctx.x } else { ctx.x + (ctx.w - w) / 2.0 };
         let draw = AtomDraw::Asset { key: a.key, w, h };
+        let span = SpanInfo { ascent: h, descent: 0.0, line_height: h, size: h, ..Default::default() };
         let tb = TextBox {
-            lines: vec![Line { x, x_shift: 0.0, top: self.y, height: h, baseline: self.y + h, g0: 0, g1: 1, byte0: 0, byte1: 0, width: w }],
-            glyphs: vec![Glyph { x0: 0.0, x1: w, byte: 0, id: 0, font: 0, span: 0, flags: FLAG_ATOM }],
-            spans: vec![SpanInfo::default()],
+            lines: vec![Line { x, x_shift: 0.0, top: self.y, height: h, baseline: self.y + h, g0: 0, g1: 1, byte0: src.start, byte1: src.end, width: w }],
+            glyphs: vec![Glyph { x0: 0.0, x1: w, byte: src.start, id: 0, font: 0, span: 0, flags: FLAG_ATOM }],
+            spans: vec![span],
             atoms: vec![draw],
+            byte0: src.start,
+            byte1: src.end,
             rect: Rect::new(x, self.y, w, h),
+            selectable: true,
             ..Default::default()
         };
-        self.out.layers[self.layer].boxes.push(tb);
-        self.y += h;
+        self.keep(self.y, self.y + h);
+        if overflow {
+            let bar = 12.0;
+            self.out.layers.push(Layer::default());
+            let view = Rect::new(ctx.x, self.y, ctx.w, h);
+            self.out.areas.push(Area { key: scroll_key.unwrap_or(0), view, content_w: w, scrollbar_y: view.bottom() });
+            self.out.layers.last_mut().expect("layer").boxes.push(tb);
+            self.y += h + bar;
+        } else {
+            self.out.layers[self.layer].boxes.push(tb);
+            self.y += h;
+        }
+    }
+
+    /// `.diagram-error`: accent colour, mono, `.85em`, left-aligned, wrapped.
+    fn error_block(&mut self, msg: &str, ctx: Ctx) {
+        let font = FontSpec { family: Family::Mono, bold: false, italic: false };
+        let size = ctx.size * 0.85;
+        let (asc, desc) = self.shaper.metrics(font, size);
+        let lh = size * 1.5;
+        let color = self.p.accent;
+        let mut lines: Vec<String> = Vec::new();
+        for raw in msg.lines().take(40) {
+            let mut cur = String::new();
+            for word in raw.split_inclusive(' ') {
+                self.glyph_buf.clear();
+                let w = self.shaper.shape(&format!("{cur}{word}"), font, size, &mut self.glyph_buf);
+                if w > ctx.w && !cur.is_empty() {
+                    lines.push(std::mem::take(&mut cur));
+                }
+                // A single word wider than the pane is cut by characters.
+                let mut rest = word;
+                loop {
+                    self.glyph_buf.clear();
+                    if self.shaper.shape(&format!("{cur}{rest}"), font, size, &mut self.glyph_buf) <= ctx.w || rest.chars().count() <= 1 {
+                        break;
+                    }
+                    let mut cut = 0;
+                    for (i, c) in rest.char_indices() {
+                        self.glyph_buf.clear();
+                        let end = i + c.len_utf8();
+                        if self.shaper.shape(&format!("{cur}{}", &rest[..end]), font, size, &mut self.glyph_buf) > ctx.w {
+                            break;
+                        }
+                        cut = end;
+                    }
+                    if cut == 0 {
+                        cut = rest.chars().next().map_or(1, char::len_utf8);
+                    }
+                    lines.push(format!("{cur}{}", &rest[..cut]));
+                    cur.clear();
+                    rest = &rest[cut..];
+                }
+                cur.push_str(rest);
+            }
+            lines.push(cur);
+        }
+        for l in lines {
+            let t = self.chrome_text(&l, font, size, color, 0.0, 0.0);
+            let base = self.y + (lh - (asc + desc)) / 2.0 + asc;
+            self.push_chrome(t, ctx.x, base);
+            self.y += lh;
+        }
     }
 
     /// `.md pre`: the bordered box, its text and, for code, the copy button.
@@ -1410,6 +1531,7 @@ impl Layouter<'_> {
             self.push_box(tb);
         }
         self.y = top + full_h;
+        self.keep(top, self.y);
         if copy {
             self.copy_button(key, text, box_x + box_w, top);
         }
@@ -1722,6 +1844,7 @@ impl Layouter<'_> {
                 placed.push((cell, lines, h, inner));
             }
             let full_row = row_h + 2.0 * pad_y + 1.0;
+            self.keep(y, y + full_row);
             let is_head = ri < head_rows;
             let mut x = ctx.x;
             for (col, (cell, lines, h, inner)) in placed.into_iter().enumerate() {

@@ -17,6 +17,7 @@ use gpui::{
 };
 use mdv_theme::Mode;
 
+use super::content::{ContentAssets, ContentStore};
 use super::images::ImageStore;
 use super::shaper::GpuiShaper;
 use crate::doc::Document;
@@ -145,6 +146,11 @@ pub struct ReaderView {
     bounds: Bounds<Pixels>,
     images: Arc<ImageStore>,
     images_seen: u64,
+    content: ContentStore,
+    content_scale: f32,
+    /// Chunk -> keys of maths and diagrams its layout was waiting for.
+    waiting: HashMap<usize, Vec<u64>>,
+    watching: bool,
     prefetching: Option<usize>,
     prefetch_queue_gen: u64,
     last_heading: Option<usize>,
@@ -157,6 +163,13 @@ impl EventEmitter<ReaderEvent> for ReaderView {}
 struct ViewAssets<'a> {
     images: &'a ImageStore,
     extra: Option<&'a (dyn Assets + Send + Sync)>,
+    content: ContentAssets<'a>,
+}
+
+impl ViewAssets<'_> {
+    fn waiting(self) -> Vec<u64> {
+        self.content.waiting.into_inner()
+    }
 }
 
 impl Assets for ViewAssets<'_> {
@@ -164,10 +177,28 @@ impl Assets for ViewAssets<'_> {
         self.images.image(source)
     }
     fn math(&self, src: &str, display: bool, font_size: f32) -> Option<layout::AssetBox> {
-        self.extra.and_then(|e| e.math(src, display, font_size))
+        match self.extra {
+            Some(e) => e.math(src, display, font_size),
+            None => self.content.math(src, display, font_size),
+        }
     }
     fn mermaid(&self, src: &str) -> Option<layout::AssetBox> {
-        self.extra.and_then(|e| e.mermaid(src))
+        match self.extra {
+            Some(e) => e.mermaid(src),
+            None => self.content.mermaid(src),
+        }
+    }
+    fn math_error(&self, src: &str, display: bool, font_size: f32) -> Option<String> {
+        if self.extra.is_some() {
+            return None;
+        }
+        self.content.math_error(src, display, font_size)
+    }
+    fn mermaid_error(&self, src: &str) -> Option<String> {
+        if self.extra.is_some() {
+            return None;
+        }
+        self.content.mermaid_error(src)
     }
 }
 
@@ -208,6 +239,10 @@ impl ReaderView {
             bounds: Bounds::default(),
             images: Arc::new(ImageStore::new(None)),
             images_seen: 0,
+            content: ContentStore::new(),
+            content_scale: 1.0,
+            waiting: HashMap::new(),
+            watching: false,
             prefetching: None,
             prefetch_queue_gen: 0,
             last_heading: None,
@@ -238,6 +273,8 @@ impl ReaderView {
         self.images = Arc::new(ImageStore::new(doc.path.clone()));
         self.images_seen = 0;
         self.layouts.clear();
+        self.waiting.clear();
+        self.content.cancel_queued();
         self.states.clear();
         self.area_scroll.clear();
         self.selection = None;
@@ -361,8 +398,14 @@ impl ReaderView {
         let n = doc.chunks.len();
         let mut shaper = GpuiShaper::new(window.text_system().clone());
         let extra = self.assets.as_deref();
-        let assets = ViewAssets { images: &self.images, extra };
+        let assets = ViewAssets { images: &self.images, extra, content: ContentAssets::new(&self.content, opts.mode, self.content_scale) };
         let l = Arc::new(layout::layout_chunk(&c, opts, st, i == 0, i + 1 == n, &mut shaper, &assets));
+        let waits = assets.waiting();
+        if waits.is_empty() {
+            self.waiting.remove(&i);
+        } else {
+            self.waiting.insert(i, waits);
+        }
         for id in self.images.take_started() {
             self.images.load(id);
         }
@@ -423,6 +466,49 @@ impl ReaderView {
             self.prefix_dirty = true;
             self.cur = Some(opts);
             self.prefetch_queue_gen += 1;
+        }
+        // The window moved to a screen of another density: pictures are redrawn at the new one.
+        let scale = window.scale_factor();
+        if (scale - self.content_scale).abs() > 1e-3 {
+            self.content_scale = scale;
+            self.capture_text_anchor();
+            self.layouts.clear();
+            self.waiting.clear();
+            self.prefetch_queue_gen += 1;
+        }
+        // Maths and diagrams that finished: only the chunks that waited for them are redone.
+        let done = self.content.take_done();
+        if !done.is_empty() {
+            let stale: Vec<usize> = self.waiting.iter().filter(|(_, ks)| ks.iter().any(|k| done.contains(k))).map(|(i, _)| *i).collect();
+            for i in stale {
+                self.waiting.remove(&i);
+                self.invalidate_chunk(i);
+            }
+        }
+        if self.content.outstanding() > 0 && !self.watching {
+            self.watching = true;
+            cx.spawn(async move |this, cx| {
+                let mut seen = 0u64;
+                loop {
+                    cx.background_executor().timer(Duration::from_millis(33)).await;
+                    let go = this
+                        .update(cx, |v, cx| {
+                            let fin = v.content.finished();
+                            if fin != seen {
+                                seen = fin;
+                                cx.notify();
+                            }
+                            let busy = v.content.outstanding() > 0;
+                            v.watching = busy;
+                            busy
+                        })
+                        .unwrap_or(false);
+                    if !go {
+                        break;
+                    }
+                }
+            })
+            .detach();
         }
         // An image finished: its chunk needs its real size.
         let finished = self.images.finished();
@@ -619,6 +705,8 @@ impl ReaderView {
         let st = self.states.get(&k).cloned().unwrap_or_default();
         let images = self.images.clone();
         let extra = self.assets.clone();
+        let content = self.content.clone();
+        let content_scale = self.content_scale;
         let text_system = cx.text_system().clone();
         let enabled = self.perf.enabled;
         let task = cx.background_spawn(async move {
@@ -628,18 +716,25 @@ impl ReaderView {
             // shared across threads, and the platform text system underneath is thread-safe.
             let wts = std::rc::Rc::new(gpui::WindowTextSystem::new(text_system));
             let mut shaper = GpuiShaper::new(wts);
-            let assets = ViewAssets { images: &images, extra: extra.as_deref() };
+            let assets = ViewAssets { images: &images, extra: extra.as_deref(), content: ContentAssets::new(&content, opts.mode, content_scale) };
             let l = layout::layout_chunk(&c, &opts, &st, k == 0, k + 1 == doc2.chunks.len(), &mut shaper, &assets);
-            (Arc::new(l), t.elapsed())
+            (Arc::new(l), t.elapsed(), assets.waiting())
         });
         let doc_id = doc.id;
         cx.spawn(async move |this, cx| {
-            let (l, took) = task.await;
+            let (l, took, waits) = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.prefetching = None;
                 // The result must belong to exactly this parse and these settings.
                 let current = this.doc.as_ref().is_some_and(|d| d.id == doc_id) && this.prefetch_queue_gen == gen && this.cur == Some(opts);
-                if current && !this.layouts.contains_key(&k) && !this.states.contains_key(&k) {
+                // A formula that finished while this was being laid out leaves it stale.
+                let fresh = waits.iter().all(|w| this.content.is_pending(*w));
+                if current && fresh && !this.layouts.contains_key(&k) && !this.states.contains_key(&k) {
+                    if waits.is_empty() {
+                        this.waiting.remove(&k);
+                    } else {
+                        this.waiting.insert(k, waits);
+                    }
                     if enabled {
                         this.perf.layout_ms.push(took.as_secs_f32() * 1000.0);
                     }
@@ -1425,6 +1520,7 @@ struct Paint<'a> {
     spans: Option<&'a [ByteSpan]>,
     chunk: usize,
     scale: f32,
+    content: &'a ContentStore,
     view_h: f32,
     y: f32,
     selection_bg: Hsla,
@@ -1463,6 +1559,7 @@ fn paint_reader(v: &mut ReaderView, bounds: Bounds<Pixels>, window: &mut Window,
                 spans: spans.as_deref().map(|x| x.as_slice()),
                 chunk: vis.chunk,
                 scale,
+                content: &v.content,
                 view_h,
                 y: vis.y,
                 selection_bg: hsla(p.accent),
@@ -1659,7 +1756,7 @@ fn paint_box(b: &TextBox, ox: f32, oy: f32, view_top: f32, view_bottom: f32, c: 
             let x = ox + l.x + g.x0 - l.x_shift;
             let s = &b.spans[g.span as usize];
             if g.flags & FLAG_ATOM != 0 {
-                paint_atom(&b.atoms[g.id as usize], x, baseline + s.descent, s.color, images, window);
+                paint_atom(&b.atoms[g.id as usize], x, baseline + s.descent, s.color, images, c.content, window);
                 continue;
             }
             let selected = sel.is_some_and(|(lo, hi)| g.byte >= lo && g.byte < hi);
@@ -1704,7 +1801,7 @@ fn text_box_on_line(b: &TextBox, l: &layout::Line, byte: u32) -> (f32, f32) {
     }
 }
 
-fn paint_atom(a: &layout::AtomDraw, x: f32, bottom: f32, color: u32, images: &ImageStore, window: &mut Window) {
+fn paint_atom(a: &layout::AtomDraw, x: f32, bottom: f32, color: u32, images: &ImageStore, content: &ContentStore, window: &mut Window) {
     match a {
         layout::AtomDraw::Image { key, w, h } => {
             if let Some(img) = images.by_key(*key) {
@@ -1717,6 +1814,12 @@ fn paint_atom(a: &layout::AtomDraw, x: f32, bottom: f32, color: u32, images: &Im
             let bounds = Bounds::new(point(px(x), px(bottom - h)), size(px(*w), px(*h)));
             window.paint_quad(quad(bounds, Corners::all(px(0.0)), gpui::transparent_black(), Edges::all(px(1.0)), hsla(color), BorderStyle::Dashed));
         }
-        layout::AtomDraw::Asset { .. } | layout::AtomDraw::EmptyBox { .. } => {}
+        layout::AtomDraw::Asset { key, w, h } => {
+            if let Some(img) = content.by_key(*key) {
+                let bounds = Bounds::new(point(px(x), px(bottom - h)), size(px(*w), px(*h)));
+                let _ = window.paint_image(bounds, bounds, Corners::all(px(0.0)), img, 0, false);
+            }
+        }
+        layout::AtomDraw::EmptyBox { .. } => {}
     }
 }
