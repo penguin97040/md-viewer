@@ -1889,7 +1889,14 @@ fn paint_atom(a: &layout::AtomDraw, x: f32, bottom: f32, color: u32, images: &Im
             window.paint_quad(quad(bounds, Corners::all(px(0.0)), gpui::transparent_black(), Edges::all(px(1.0)), hsla(color), BorderStyle::Dashed));
         }
         layout::AtomDraw::Asset { key, w, h } => {
-            if let Some(img) = content.by_key(*key) {
+            let scale = window.scale_factor();
+            // A diagram shown narrower than it was drawn is drawn again at the size it is shown.
+            let (img, queued) = if *w > 0.0 { content.for_display(*key, *w, scale) } else { (content.by_key(*key), false) };
+            if queued {
+                // Render again next frame, which starts the watcher that repaints when it is done.
+                window.request_animation_frame();
+            }
+            if let Some(img) = img {
                 let bounds = device_aligned(x, bottom - h, *w, *h, &img, window.scale_factor());
                 let _ = window.paint_image(bounds, bounds, Corners::all(px(0.0)), img, 0, false);
             }

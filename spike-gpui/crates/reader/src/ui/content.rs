@@ -30,13 +30,22 @@ const MERMAID_PX: f32 = 16.0;
 
 enum Entry {
     Pending,
-    Ready { w: f32, h: f32, baseline: f32, image: Arc<RenderImage>, bytes: usize, used: u64 },
+    Ready { w: f32, h: f32, baseline: f32, image: Arc<RenderImage>, bytes: usize, used: u64, redraw: Option<Redraw> },
     Failed(String),
+}
+
+/// What a finished diagram needs to be rasterised again at another size without laying it out again.
+#[derive(Clone)]
+struct Redraw {
+    asset: Arc<RenderedAsset>,
+    dark: bool,
 }
 
 enum Kind {
     Math { src: String, display: bool, opts: MathOptions },
     Mermaid { src: String, opts: DiagramOptions },
+    /// A finished diagram drawn again so that it is `width` physical pixels wide.
+    Sharp { base: u64, redraw: Redraw, width: u32 },
 }
 
 struct Job {
@@ -51,6 +60,10 @@ struct Map {
     bytes: usize,
     tick: u64,
     done: Vec<u64>,
+    /// Per diagram, the latest size-matched raster asked for: (its key, its width in pixels).
+    sharp: HashMap<u64, (u64, u32)>,
+    /// Per diagram, the key of the newest size-matched raster that finished.
+    last_ready: HashMap<u64, u64>,
 }
 
 #[derive(Default)]
@@ -172,6 +185,64 @@ impl ContentStore {
         }
     }
 
+    /// The raster to paint a diagram that is shown `w` logical pixels wide, narrower than its own
+    /// size. Asks for the diagram to be drawn again at exactly that many device pixels, so that it
+    /// paints one raster pixel to one device pixel as other rasters do, and meanwhile answers with
+    /// the previous size-matched raster, or the one it has, which the GPU scales. The second value is
+    /// true when a new render was queued, so the caller can ask for another frame.
+    pub fn for_display(&self, key: u64, w: f32, scale: f32) -> (Option<Arc<RenderImage>>, bool) {
+        let width = (w * scale).ceil() as u32;
+        let mut m = self.inner.map.lock().expect("lock");
+        m.tick += 1;
+        let t = m.tick;
+        let redraw = match m.entries.get_mut(&key) {
+            Some(Entry::Ready { image, used, redraw, .. }) => {
+                *used = t;
+                let natural = image.size(0).width.0 as u32;
+                match redraw {
+                    Some(r) if width >= 1 && width + 1 < natural => (image.clone(), r.clone()),
+                    _ => return (Some(image.clone()), false),
+                }
+            }
+            _ => return (None, false),
+        };
+        let (base_image, redraw) = redraw;
+        let vkey = hash_of(("s", key, width));
+        if let Some(Entry::Ready { image, used, .. }) = m.entries.get_mut(&vkey) {
+            *used = t;
+            return (Some(image.clone()), false);
+        }
+        let mut queued = false;
+        if !matches!(m.entries.get(&vkey), Some(Entry::Pending)) {
+            // One request per diagram is wanted at a time: a newer size replaces a queued older one.
+            if let Some((old, _)) = m.sharp.insert(key, (vkey, width)) {
+                let mut q = self.inner.queue.lock().expect("lock");
+                if let Some(i) = q.iter().position(|j| j.key == old) {
+                    q.remove(i);
+                    self.inner.outstanding.fetch_sub(1, Ordering::AcqRel);
+                    if matches!(m.entries.get(&old), Some(Entry::Pending)) {
+                        m.entries.remove(&old);
+                    }
+                }
+            }
+            m.entries.insert(vkey, Entry::Pending);
+            self.inner.outstanding.fetch_add(1, Ordering::AcqRel);
+            self.inner.queue.lock().expect("lock").push_back(Job { key: vkey, kind: Kind::Sharp { base: key, redraw, width }, scale });
+            queued = true;
+        }
+        // The newest finished size-matched raster of this diagram, if any, else the base one.
+        let shown = match m.last_ready.get(&key).and_then(|k| m.entries.get(k)) {
+            Some(Entry::Ready { image, .. }) => image.clone(),
+            _ => base_image,
+        };
+        drop(m);
+        if queued {
+            self.start_workers();
+            self.inner.wake.notify_one();
+        }
+        (Some(shown), queued)
+    }
+
     fn start_workers(&self) {
         if self.inner.started.swap(true, Ordering::AcqRel) {
             return;
@@ -222,10 +293,18 @@ fn worker(inner: Arc<Inner>) {
         let mut m = inner.map.lock().expect("lock");
         // Only a job still wanted (not cancelled) has a Pending entry to complete.
         let entry = match result {
-            Ok((w, h, baseline, image, bytes)) => {
+            Ok((w, h, baseline, image, bytes, redraw)) => {
                 m.bytes += bytes;
                 m.tick += 1;
-                Entry::Ready { w, h, baseline, image, bytes, used: m.tick }
+                if let Kind::Sharp { base, .. } = &job.kind {
+                    // The older size-matched raster has been replaced; its memory goes.
+                    if let Some(old) = m.last_ready.insert(*base, job.key).filter(|o| *o != job.key) {
+                        if let Some(Entry::Ready { bytes, .. }) = m.entries.remove(&old) {
+                            m.bytes -= bytes;
+                        }
+                    }
+                }
+                Entry::Ready { w, h, baseline, image, bytes, used: m.tick, redraw }
             }
             Err(e) => Entry::Failed(e),
         };
@@ -252,23 +331,38 @@ fn evict(m: &mut Map) {
     }
 }
 
-type Done = (f32, f32, f32, Arc<RenderImage>, usize);
+type Done = (f32, f32, f32, Arc<RenderImage>, usize, Option<Redraw>);
 
 fn run(job: &Job) -> Result<Done, String> {
-    let asset: RenderedAsset = match &job.kind {
-        Kind::Math { src, display, opts } => mdv_content::render_math(src, *display, opts),
-        Kind::Mermaid { src, opts } => mdv_content::render_mermaid(src, opts),
-    }
-    .map_err(|e| e.to_string())?;
-    let mut scale = job.scale.clamp(0.5, 8.0);
-    let px = asset.width_px * asset.height_px * scale * scale;
-    if px > MAX_RASTER_PIXELS {
-        scale *= (MAX_RASTER_PIXELS / px).sqrt();
-    }
-    let mut img = rasterise(&asset, scale).map_err(|e| e.to_string())?;
-    let dark = match &job.kind {
-        Kind::Math { opts, .. } => opts.theme == ContentTheme::Dark,
-        Kind::Mermaid { opts, .. } => opts.theme == ContentTheme::Dark,
+    let (asset, mut img, dark, redraw) = match &job.kind {
+        Kind::Sharp { redraw, width, .. } => {
+            let a = &redraw.asset;
+            // `rasterise` rounds the width up, so aim a hair under the whole number.
+            let scale = (*width as f32 - 0.001) / a.width_px;
+            let img = rasterise(a, scale).map_err(|e| e.to_string())?;
+            (a.clone(), img, redraw.dark, None)
+        }
+        kind => {
+            let asset: RenderedAsset = match kind {
+                Kind::Math { src, display, opts } => mdv_content::render_math(src, *display, opts),
+                Kind::Mermaid { src, opts } => mdv_content::render_mermaid(src, opts),
+                Kind::Sharp { .. } => unreachable!(),
+            }
+            .map_err(|e| e.to_string())?;
+            let mut scale = job.scale.clamp(0.5, 8.0);
+            let px = asset.width_px * asset.height_px * scale * scale;
+            if px > MAX_RASTER_PIXELS {
+                scale *= (MAX_RASTER_PIXELS / px).sqrt();
+            }
+            let img = rasterise(&asset, scale).map_err(|e| e.to_string())?;
+            let dark = match kind {
+                Kind::Math { opts, .. } => opts.theme == ContentTheme::Dark,
+                Kind::Mermaid { opts, .. } => opts.theme == ContentTheme::Dark,
+                Kind::Sharp { .. } => false,
+            };
+            let redraw = matches!(kind, Kind::Mermaid { .. }).then(|| Redraw { asset: Arc::new(asset.clone()), dark });
+            (Arc::new(asset), img, dark, redraw)
+        }
     };
     if dark {
         boost_light_on_dark(&mut img);
@@ -285,7 +379,7 @@ fn run(job: &Job) -> Result<Done, String> {
     let bytes = px.len();
     let buf = image::RgbaImage::from_raw(img.width, img.height, px).ok_or_else(|| "bad raster size".to_string())?;
     let image = Arc::new(RenderImage::new(vec![image::Frame::new(buf)]));
-    Ok((asset.width_px, asset.height_px, asset.baseline_px, image, bytes))
+    Ok((asset.width_px, asset.height_px, asset.baseline_px, image, bytes, redraw))
 }
 
 /// The `Assets` the layout sees for one pass: this store, one colour scheme and one scale.
