@@ -1694,8 +1694,37 @@ fn report_live_objects(device: &ID3D11Device) -> Result<()> {
 
 const BUFFER_COUNT: usize = 3;
 
+/// Spike instrumentation: when `MDV_TIMING` names a file, append one line per shader compile
+/// (with a running total). Does nothing when the variable is unset.
+pub(crate) mod spike_timing {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    static TOTAL_NANOS: AtomicU64 = AtomicU64::new(0);
+
+    pub(crate) fn record_shader(entry: &str, took: Duration) {
+        let Some(path) = std::env::var_os("MDV_TIMING") else { return };
+        let total = TOTAL_NANOS.fetch_add(took.as_nanos() as u64, Ordering::Relaxed) + took.as_nanos() as u64;
+        let epoch_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(
+                f,
+                "epoch_ms={epoch_ms:.1} shader={} compile_ms={:.2} shader_total_ms={:.2}",
+                entry.trim_end_matches('\0'),
+                took.as_secs_f64() * 1000.0,
+                total as f64 / 1.0e6
+            );
+        }
+    }
+}
+
 pub(crate) mod shader_resources {
     use anyhow::Result;
+    use super::spike_timing;
 
     #[cfg(all())]
     use windows::{
@@ -1838,6 +1867,7 @@ pub(crate) mod shader_resources {
             let entry_point = PCSTR::from_raw(entry.as_ptr());
             let target_cstr = PCSTR::from_raw(target.as_ptr());
 
+            let timing_start = std::time::Instant::now();
             let ret = D3DCompile(
                 source.as_ptr() as *const core::ffi::c_void,
                 source.len(),
@@ -1851,6 +1881,7 @@ pub(crate) mod shader_resources {
                 &mut compile_blob,
                 Some(&mut error_blob),
             );
+            spike_timing::record_shader(&entry, timing_start.elapsed());
             if ret.is_err() {
                 let Some(error_blob) = error_blob else {
                     return Err(anyhow::anyhow!("{ret:?}"));

@@ -272,6 +272,7 @@ impl AppView {
                 cx.notify();
             }))
             .cursor_pointer()
+            .occlude()
             .hover(move |s| s.bg(c(p.bg_hover)).text_color(c(if on { p.accent } else { p.text })))
             .focus_visible(move |s| s.border_2().border_color(c(p.accent)))
             .tooltip(tooltip(tip, p))
@@ -362,6 +363,7 @@ impl AppView {
                     .hover(move |s| if is_active { s } else { s.bg(c(p.bg_hover)).text_color(c(p.text)) })
                     .focus_visible(move |s| s.border_2().border_color(c(p.accent)))
                     .cursor_default()
+                    .occlude()
                     .on_hover(cx.listener(move |this, h: &bool, _, cx| {
                         if *h {
                             this.hover = Some(("tab", i));
@@ -413,10 +415,15 @@ impl AppView {
             .min_w_0()
             .h_full()
             .window_control_area(WindowControlArea::Drag)
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, window, cx| {
-                cx.stop_propagation();
-                this.press_header(e, window);
-            }));
+            // Windows moves the window natively (HTCAPTION), but only if no handler stops the
+            // press: handle_nc_mouse_down_msg returns early when propagation is stopped, and a
+            // double-click must reach DefWindowProc to maximise. So no handler there.
+            .when(!cfg!(target_os = "windows"), |d| {
+                d.on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.press_header(e, window);
+                }))
+            });
         strip = strip.child(filler);
 
         let find_open = self.find_open;
@@ -457,6 +464,10 @@ impl AppView {
             .items_center()
             .gap(px(if narrow { 0.0 } else { 2.0 }))
             .h(px(m::BAR_HEIGHT))
+            // Windows: the whole bar (gaps, padding, title, strip space) is a caption area.
+            // Buttons and tabs `.occlude()` so the bar's hitbox is excluded under them and the
+            // first-match hit test in gpui-pre sees them instead.
+            .window_control_area(WindowControlArea::Drag)
             .pl(px(if mac { m::MAC_BAR_INSET } else if narrow { 4.0 } else { m::BAR_PADDING_X }))
             .pr(px(if narrow { 4.0 } else { m::BAR_PADDING_X }))
             .bg(c(p.bg_bar))
@@ -1099,6 +1110,11 @@ impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.first_render_logged {
             self.first_render_logged = true;
+            if std::env::var_os("MDV_TIMING").is_some() {
+                crate::timing::log("first_render_started");
+                window.on_next_frame(|_, _| crate::timing::log("first_frame_painted_approx"));
+                window.refresh();
+            }
             if self.perf {
                 eprintln!("[perf] first render after {:?}", self.started.elapsed());
             }

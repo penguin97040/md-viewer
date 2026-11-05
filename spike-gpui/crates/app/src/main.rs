@@ -2,6 +2,7 @@
 
 mod assets;
 mod ui;
+mod timing;
 mod view;
 
 use std::borrow::Cow;
@@ -57,6 +58,7 @@ fn huge(n: usize) -> Vec<Heading> {
 }
 
 fn main() {
+    timing::log("main_entered");
     let demo = std::env::var("MDV_DEMO").unwrap_or_default();
     let has = move |k: &str| demo.split(',').any(|d| d == k);
     let (w, h) = std::env::var("MDV_SIZE")
@@ -131,6 +133,7 @@ fn main() {
             view
         })
         .unwrap();
+        timing::log("window_created");
         cx.activate(true);
     });
 }
