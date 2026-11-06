@@ -3272,6 +3272,7 @@ dependencies = [
  "mdv-reader",
  "mdv-theme",
  "raw-window-handle",
+ "serde_json",
 ]
 
 [[package]]

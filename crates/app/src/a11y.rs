@@ -56,7 +56,7 @@ pub fn input_text(text: String) -> impl FnOnce(&mut A11ySubtreeBuilder<'_>) + 's
 // ---- the document sample (MDV_A11Y_DOC=<paragraphs>) -------------------------------------------
 
 const ROW: f32 = 28.0;
-/// Measured at about 3,000 paragraphs with no visible CPU cost (see the spike report).
+/// Measured at about 3,000 paragraphs with no visible CPU cost.
 const MAX_EXPOSED: usize = 3000;
 
 pub struct DocSample {

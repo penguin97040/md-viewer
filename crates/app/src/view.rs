@@ -1,5 +1,5 @@
 //! The window chrome: header, tabs, TOC, find bar, web-images bar, toast, empty state and the
-//! settings popover. Specification: frontend/index.html, style.css, windowbar.js, toc.js, tabs.js.
+//! settings popover, and the settings, reload and file-drop behaviour shared by every window.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -9,7 +9,7 @@ use gpui::{
     AccessibleAction, Bounds, Context, CursorStyle, Role, ScrollStrategy,
     Decorations, Div, FocusHandle, FontWeight, HitboxBehavior, IntoElement, KeyDownEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ResizeEdge, ScrollHandle,
-    SharedString, Stateful, UniformListScrollHandle, Window, WindowControlArea,
+    ExternalPaths, ScrollEvent, SharedString, Stateful, UniformListScrollHandle, Window, WindowControlArea,
 };
 use mdv_theme::{metrics as m, Mode};
 
@@ -18,13 +18,14 @@ use crate::a11y;
 use mdv_reader::ui::{field, pane::{self, ReaderEvent, ReaderView}};
 use std::path::PathBuf;
 use crate::assets;
+use crate::settings::{self, Prefs};
 use crate::tab_move::{self, TabId, TabState};
+use crate::watch::Watch;
 use crate::ui::{c, icon, spaced, tabular, tooltip, transparent, up};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 const MONO: &str = "Geist Mono";
 const SANS: &str = "Geist";
-const SERIF: &str = "Geist Serif";
 
 #[derive(Clone)]
 pub struct Heading {
@@ -39,15 +40,17 @@ pub struct TabData {
     pub headings: std::rc::Rc<Vec<Heading>>,
     /// Follows the tab between windows. Add per-tab reader state here, not to `AppView`.
     pub state: TabState,
-    /// reader: `None` only for the chrome's stub demo tabs.
+    /// `None` only for a tab that is still being made.
     pub reader: Option<gpui::Entity<ReaderView>>,
+    /// Reports changes to the file while live reload is on. Dropped with the tab.
+    pub watch: Option<Watch>,
     /// Reader events go to whichever window holds the tab, so this is remade on every move.
     pub reader_events: Option<gpui::Subscription>,
 }
 
 impl TabData {
     pub fn new(name: SharedString, path: SharedString, headings: std::rc::Rc<Vec<Heading>>) -> Self {
-        Self { id: tab_move::next_tab_id(), name, path, headings, state: TabState::default(), reader: None, reader_events: None }
+        Self { id: tab_move::next_tab_id(), name, path, headings, state: TabState::default(), reader: None, watch: None, reader_events: None }
     }
 }
 
@@ -59,7 +62,7 @@ pub struct DropMarker {
     pub height: f32,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Settings {
     pub serif: bool,
     pub padding: f32,
@@ -105,6 +108,19 @@ impl StepKey {
     }
 }
 
+/// Why a file is being read again.
+#[derive(Clone, Copy)]
+pub enum Reload {
+    /// Asked for with the button, F5 or Ctrl+R: a failure is shown.
+    Manual,
+    /// The file changed on disk. Editors that save by renaming can leave it missing for a moment, so
+    /// a failed read is tried once more after 300 ms, and a second failure is silent.
+    Live { retry: bool },
+}
+
+/// Most files one drop opens, so one gesture cannot start an unbounded amount of work.
+const MAX_DROPPED: usize = 50;
+
 pub struct AppView {
     pub mode: Mode,
     pub mac: bool,
@@ -146,16 +162,21 @@ pub struct AppView {
     /// The find input is about to go. Without this, focus stays on a removed element and key events
     /// no longer pass through the root's handlers.
     refocus_root: bool,
+    /// What the other windows and the settings file last heard from this view.
+    synced: Prefs,
+    /// Wheel movement not yet worth a font size step.
+    wheel: f32,
 }
 
 impl AppView {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let prefs = settings::current(cx);
         Self {
-            mode: Mode::Dark,
+            mode: prefs.mode,
             mac: cfg!(target_os = "macos") || std::env::var("MDV_PLATFORM").as_deref() == Ok("mac"),
             tabs: Vec::new(),
             active: 0,
-            toc_open: true,
+            toc_open: prefs.toc,
             find_open: false,
             find_field: field::Field::default(),
             find_focus: false,
@@ -168,7 +189,7 @@ impl AppView {
             settings_open: false,
             tools_open: false,
             licence: None,
-            s: Settings::DEFAULTS,
+            s: prefs.layout,
             toc_scroll: UniformListScrollHandle::new(),
             current: 0,
             root_focus: cx.focus_handle(),
@@ -186,6 +207,8 @@ impl AppView {
             doc_sample: a11y::DocSample::from_env(),
             title: String::new(),
             refocus_root: false,
+            synced: prefs,
+            wheel: 0.0,
         }
     }
 
@@ -262,6 +285,7 @@ impl AppView {
         let at = at.min(self.tabs.len());
         self.tabs.insert(at, data);
         self.active = at;
+        self.sync_watches();
         self.load_active_state();
         self.tab_scroll.scroll_to_item(at);
         cx.notify();
@@ -294,6 +318,133 @@ impl AppView {
 
     pub(crate) fn reader(&self) -> Option<gpui::Entity<ReaderView>> {
         self.tabs.get(self.active).and_then(|t| t.reader.clone())
+    }
+
+    // ---- settings shared by every window ----------------------------------------------------------
+
+    fn prefs(&self) -> Prefs {
+        Prefs { layout: self.s, mode: self.mode, toc: self.toc_open }
+    }
+
+    /// Takes settings changed in another window.
+    pub fn apply_prefs(&mut self, p: Prefs, cx: &mut Context<Self>) {
+        self.s = p.layout;
+        self.mode = p.mode;
+        self.toc_open = p.toc;
+        self.synced = p;
+        self.sync_watches();
+        cx.notify();
+    }
+
+    /// Makes the tabs' watchers match the live reload setting.
+    pub fn sync_watches(&mut self) {
+        let live = self.s.live_reload;
+        for tab in &mut self.tabs {
+            if !live || tab.reader.is_none() {
+                tab.watch = None;
+            } else if tab.watch.is_none() {
+                tab.watch = tab_move::watch_tab(tab.id, &tab.path);
+            }
+        }
+    }
+
+    // ---- reloading --------------------------------------------------------------------------------
+
+    /// Reload for the button, F5 and Ctrl+R.
+    fn reload_active(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.tabs.get(self.active).map(|t| t.id) {
+            self.reload_tab(id, Reload::Manual, cx);
+        }
+    }
+
+    /// Reads a tab's file again, keeping the reading position. Wherever the tab is by the time the
+    /// read finishes, that is the window that gets the new outline.
+    fn reload_tab(&mut self, id: TabId, kind: Reload, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.iter().find(|t| t.id == id) else { return };
+        let Some(reader) = tab.reader.clone() else { return };
+        let path = PathBuf::from(tab.path.as_ref());
+        reader.update(cx, |r, cx| {
+            r.reload(path, cx, move |r, result, cx| {
+                // Deferred: this runs inside the reader's own update, which the window's update
+                // below must not re-enter.
+                match result {
+                    Ok(()) => {
+                        let outline = r.doc.as_ref().map_or(Vec::new(), |d| d.headings.iter().map(|h| Heading { level: h.level, text: h.text.clone().into() }).collect());
+                        cx.defer(move |cx| Self::reloaded(id, outline, cx));
+                    }
+                    Err(e) => cx.defer(move |cx| Self::reload_failed(id, kind, e, cx)),
+                }
+            });
+        });
+    }
+
+    /// Reloads a tab in whichever window holds it. A live reload does nothing once the setting is off.
+    pub fn reload_tab_anywhere(id: TabId, kind: Reload, cx: &mut gpui::App) {
+        let Some(view) = tab_move::view_of_tab(id, cx) else { return };
+        view.update(cx, |v, cx| {
+            if matches!(kind, Reload::Live { .. }) && !v.s.live_reload {
+                return;
+            }
+            v.reload_tab(id, kind, cx);
+        });
+    }
+
+    fn reloaded(id: TabId, outline: Vec<Heading>, cx: &mut gpui::App) {
+        let Some(view) = tab_move::view_of_tab(id, cx) else { return };
+        view.update(cx, |v, cx| {
+            let showing = v.tabs.get(v.active).is_some_and(|t| t.id == id);
+            if let Some(t) = v.tabs.iter_mut().find(|t| t.id == id) {
+                t.headings = std::rc::Rc::new(outline);
+            }
+            // The matches belonged to the old text.
+            if showing && v.find_open && !v.find_field.text.is_empty() {
+                let q = v.find_field.text.clone();
+                if let Some(r) = v.reader() {
+                    r.update(cx, |r, cx| r.find_query(&q, false, cx));
+                }
+            }
+            cx.notify();
+        });
+    }
+
+    fn reload_failed(id: TabId, kind: Reload, why: String, cx: &mut gpui::App) {
+        match kind {
+            Reload::Manual => {
+                if let Some(view) = tab_move::view_of_tab(id, cx) {
+                    view.update(cx, |v, cx| v.show_toast(&why, false, cx));
+                }
+            }
+            Reload::Live { retry: true } => {
+                cx.spawn(async move |cx| {
+                    cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
+                    cx.update(|cx| Self::reload_tab_anywhere(id, Reload::Live { retry: false }, cx));
+                })
+                .detach();
+            }
+            Reload::Live { retry: false } => {}
+        }
+    }
+
+    // ---- files dropped on the window ---------------------------------------------------------------
+
+    /// Opens files dropped from the desktop, after the same checks as a launch with files.
+    fn drop_files(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let mut first_error = None;
+        for path in paths.iter().take(MAX_DROPPED) {
+            match mdv_platform::single_instance::validate_path(path) {
+                Ok(path) => self.open_path(path, None, cx),
+                Err(why) => {
+                    let name = path.file_name().map_or_else(|| path.to_string_lossy().to_string(), |n| n.to_string_lossy().to_string());
+                    first_error.get_or_insert(format!("Could not open {name}: {why}"));
+                }
+            }
+        }
+        if paths.len() > MAX_DROPPED {
+            first_error.get_or_insert(format!("Opened the first {MAX_DROPPED} of {} files", paths.len()));
+        }
+        if let Some(message) = first_error {
+            self.show_toast(&message, false, cx);
+        }
     }
 
     pub(crate) fn reader_settings(&self) -> pane::Settings {
@@ -333,6 +484,7 @@ impl AppView {
         let mut tab = TabData::new(name, shown.clone(), Default::default());
         tab.reader_events = Some(Self::reader_events(&reader, cx));
         tab.reader = Some(reader.clone());
+        tab.watch = self.s.live_reload.then(|| tab_move::watch_tab(tab.id, &shown)).flatten();
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
         self.load_active_state();
@@ -527,6 +679,17 @@ impl AppView {
         let k = e.keystroke.key.as_str();
         let md = &e.keystroke.modifiers;
         let modkey = if self.mac { md.platform } else { md.control };
+        // Ctrl+Tab is Ctrl on every platform, where the other shortcuts use Cmd on a Mac.
+        if md.control && k == "tab" {
+            self.next_tab(if md.shift { -1 } else { 1 }, cx);
+            cx.notify();
+            return;
+        }
+        if md.alt && !modkey && k == "z" {
+            self.s.wrap = !self.s.wrap;
+            cx.notify();
+            return;
+        }
         if modkey {
             match k {
                 "f" => self.find_open(window, cx),
@@ -542,7 +705,6 @@ impl AppView {
                         self.close_tab(id, cx);
                     }
                 }
-                "tab" if md.control => self.next_tab(if md.shift { -1 } else { 1 }, cx),
                 "pagedown" => self.next_tab(1, cx),
                 "pageup" => self.next_tab(-1, cx),
                 "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" if !md.shift => {
@@ -551,7 +713,7 @@ impl AppView {
                     self.select_index(i, cx);
                 }
                 "p" => self.start_print(cx),
-                "r" => self.show_toast("Reloading is not part of this spike", false, cx),
+                "r" => self.reload_active(cx),
                 "=" | "+" => self.step(StepKey::FontSize, 1.0),
                 "-" => self.step(StepKey::FontSize, -1.0),
                 "0" => self.s.font_size = Settings::DEFAULTS.font_size,
@@ -593,7 +755,7 @@ impl AppView {
                     self.find_close(cx);
                 }
             }
-            "f5" => self.show_toast("Reloading is not part of this spike", false, cx),
+            "f5" => self.reload_active(cx),
             "f3" if !self.find_open => self.find_open(window, cx),
             "f3" => {
                 let dir = if md.shift { -1 } else { 1 };
@@ -616,6 +778,30 @@ impl AppView {
             }
         }
         cx.notify();
+    }
+
+    /// Ctrl (Cmd on a Mac) with the mouse wheel changes the font size.
+    fn wheel_zoom(&mut self, e: &ScrollEvent, cx: &mut Context<Self>) {
+        let secondary = if self.mac { e.modifiers.platform } else { e.modifiers.control };
+        if !secondary {
+            return;
+        }
+        // One step for each notch of a wheel, whatever size the platform makes it; a trackpad adds
+        // up to a step for each 40 pixels.
+        const NOTCH: f32 = 40.0;
+        let steps = match e.delta {
+            gpui::ScrollDelta::Lines(l) => l.y.signum() * (l.y != 0.0) as i32 as f32,
+            gpui::ScrollDelta::Pixels(p) => {
+                self.wheel += f32::from(p.y);
+                let steps = (self.wheel / NOTCH).trunc();
+                self.wheel -= steps * NOTCH;
+                steps.clamp(-3.0, 3.0)
+            }
+        };
+        if steps != 0.0 {
+            self.step(StepKey::FontSize, steps);
+            cx.notify();
+        }
     }
 
     fn next_tab(&mut self, dir: isize, cx: &mut Context<Self>) {
@@ -642,6 +828,7 @@ impl AppView {
         cx: &mut Context<Self>,
         click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> Stateful<Div> {
+        let tip = if self.mac { mac_tip(tip) } else { tip };
         let p = *self.mode.palette();
         let fh = self.fh(id, cx);
         let hovered = self.hover == Some((id, 0));
@@ -848,7 +1035,7 @@ impl AppView {
         let b_toc = self.icon_btn("btn-toc", "toc", "Contents (Ctrl+B)", icon_w, m::ICON_H, m::ICON_SVG, self.toc_open, cx, |t, _, _| t.toc_open = !t.toc_open)
             .aria_toggled(if self.toc_open { Toggled::True } else { Toggled::False });
         let b_open = self.icon_btn("btn-open", "open", "Open (Ctrl+O)", icon_w, m::ICON_H, m::ICON_SVG, false, cx, |t, _, cx| t.prompt_open(cx));
-        let b_reload = self.icon_btn("btn-reload", "reload", "Reload (F5)", icon_w, m::ICON_H, m::ICON_SVG, false, cx, |t, _, cx| t.show_toast("Reloading is not part of this spike", false, cx));
+        let b_reload = self.icon_btn("btn-reload", "reload", "Reload (F5)", icon_w, m::ICON_H, m::ICON_SVG, false, cx, |t, _, cx| t.reload_active(cx));
         let b_find = self.icon_btn("btn-find", "find", "Find (Ctrl+F)", icon_w, m::ICON_H, m::ICON_SVG, false, cx, move |t, w, cx| {
             if find_open {
                 t.find_close(cx);
@@ -1645,6 +1832,17 @@ impl AppView {
     }
 }
 
+/// A tooltip with Cmd in place of Ctrl, as 0.2.6 did on a Mac. Each text is made once.
+fn mac_tip(tip: &'static str) -> &'static str {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<&'static str, &'static str>>> = OnceLock::new();
+    if !tip.contains("Ctrl+") {
+        return tip;
+    }
+    let mut cache = CACHE.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    cache.entry(tip).or_insert_with(|| Box::leak(tip.replace("Ctrl+", "⌘").into_boxed_str()))
+}
+
 fn resize_edge(pos: gpui::Point<gpui::Pixels>, edge: f32, size: gpui::Size<gpui::Pixels>) -> Option<ResizeEdge> {
     let e = px(edge);
     let (l, t) = (pos.x < e, pos.y < e);
@@ -1674,6 +1872,13 @@ impl Render for AppView {
             if self.perf {
                 eprintln!("[perf] first render after {:?}", self.started.elapsed());
             }
+        }
+        let prefs = self.prefs();
+        if prefs != self.synced {
+            // A change made here: tell the other windows and the settings file.
+            self.synced = prefs;
+            let me = cx.entity();
+            cx.defer(move |cx| settings::publish(&me, prefs, cx));
         }
         let p = *self.mode.palette();
         let vs = window.viewport_size();
@@ -1718,22 +1923,7 @@ impl Render for AppView {
         } else if let Some(r) = self.reader() {
             r.into_any_element()
         } else if has_doc {
-            let tab_name = self.tabs[self.active].name.clone();
-            let s = self.s;
-            div()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .p(px(s.padding))
-                .font_family(if s.serif { SERIF } else { SANS })
-                .text_size(px(s.font_size))
-                .line_height(relative(s.line_height))
-                .text_color(c(p.muted))
-                .child(format!("Reader pane for {tab_name}: owned by the reader crate (stub)"))
-                .into_any_element()
+            div().flex_1().min_w_0().h_full().into_any_element()
         } else {
             self.empty_state(cx).into_any_element()
         };
@@ -1761,6 +1951,8 @@ impl Render for AppView {
             .line_height(relative(1.4))
             .capture_key_down(|e: &KeyDownEvent, _, cx| tab_move::capture_key_down(e, cx))
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, w, cx| this.key_down(e, w, cx)))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.drop_files(paths.paths(), cx)))
+            .on_scroll(cx.listener(|this, e: &ScrollEvent, _, cx| this.wheel_zoom(e, cx)))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, w, cx| this.mouse_move(e, w, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, e: &MouseUpEvent, w, cx| this.mouse_up(e, w, cx)))
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, e: &MouseDownEvent, window, cx| {
@@ -1814,7 +2006,29 @@ impl Render for AppView {
                 )
             })
             .child(header)
-            .child(div().flex().flex_1().min_h_0().w_full().children(toc).child(body))
+            .child(div().flex().flex_1().min_h_0().w_full().children(toc).child(
+                // The dashed outline shows while files are dragged over the document area.
+                div()
+                    .relative()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(body)
+                    .child(
+                        div()
+                            .id("drop-outline")
+                            .absolute()
+                            .top(px(8.0))
+                            .left(px(8.0))
+                            .right(px(8.0))
+                            .bottom(px(8.0))
+                            .border_2()
+                            .border_dashed()
+                            .border_color(gpui::transparent_black())
+                            .drag_over::<ExternalPaths>(move |s, _, _, _| s.border_color(c(p.accent))),
+                    ),
+            ))
             .children(find)
             .children(web)
             .children(toast)

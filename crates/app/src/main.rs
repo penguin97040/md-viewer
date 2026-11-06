@@ -3,59 +3,47 @@
 mod a11y;
 mod assets;
 mod print;
+mod settings;
 mod tab_move;
-mod ui;
 mod timing;
+mod ui;
 mod view;
+mod watch;
 
 use std::borrow::Cow;
-use std::rc::Rc;
+use std::path::PathBuf;
 
 use gpui::{px, size, App, Bounds};
 use gpui_platform::application;
 use mdv_platform::single_instance::{self, Launch};
 use mdv_theme::Mode;
-use view::{Heading, TabData};
 
-fn heading(level: u8, text: &str) -> Heading {
-    Heading { level, text: text.to_string().into() }
-}
-
-/// The outline shown in docs/screenshots/dark.png.
-fn kepler() -> Vec<Heading> {
-    vec![
-        heading(1, "Kepler Track trip plan"),
-        heading(2, "Route overview"),
-        heading(2, "Timings"),
-        heading(2, "Bookings"),
-        heading(2, "Day by day"),
-        heading(3, "Day 1: up to Luxmore Hut"),
-        heading(3, "Day 2: the alpine ridge"),
-        heading(3, "Day 3: Iris Burn to Moturau"),
-        heading(3, "Day 4: out to Rainbow Reach"),
-        heading(2, "Emergency"),
-    ]
-}
-
-fn gear() -> Vec<Heading> {
-    vec![
-        heading(1, "Gear list"),
-        heading(2, "Clothing"),
-        heading(2, "Shelter and sleep"),
-        heading(2, "Food and cooking"),
-        heading(3, "Breakfast"),
-        heading(3, "Dinner"),
-    ]
-}
-
-/// 100,000 headings for the virtualisation test (`MDV_DEMO=toc100k`).
-fn huge(n: usize) -> Vec<Heading> {
-    (0..n)
-        .map(|i| {
-            let level = if i % 1000 == 0 { 1 } else if i % 100 == 0 { 2 } else { 3 };
-            heading(level, &format!("Heading {i}: a reasonably long section title for row {i}"))
-        })
-        .collect()
+/// The path in a `file:` URL, which is how macOS hands over a document opened from the Finder.
+/// Other schemes, and files on another host, are refused.
+fn file_url_path(url: &str) -> Option<PathBuf> {
+    let rest = url.get(..7).filter(|s| s.eq_ignore_ascii_case("file://")).map(|_| &url[7..])?;
+    let rest = rest.split(['?', '#']).next()?;
+    let (host, path) = rest.split_at(rest.find('/')?);
+    if !(host.is_empty() || host.eq_ignore_ascii_case("localhost")) {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(path.len());
+    let raw = path.as_bytes();
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == b'%' {
+            let hex = std::str::from_utf8(raw.get(i + 1..i + 3)?).ok()?;
+            bytes.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            bytes.push(raw[i]);
+            i += 1;
+        }
+    }
+    let text = String::from_utf8(bytes).ok().filter(|t| !t.contains('\0'))?;
+    // `file:///C:/x` carries the drive after the slash.
+    let text = if cfg!(windows) { text.strip_prefix('/').map_or(text.clone(), str::to_string) } else { text };
+    Some(PathBuf::from(text))
 }
 
 fn main() {
@@ -82,7 +70,14 @@ fn main() {
         }
     };
 
-    application().with_assets(assets::Assets).run(move |cx: &mut App| {
+    // The system hands over documents opened from the Finder (macOS) here, both at launch and while
+    // the app runs. They wait in the channel until the window exists.
+    let (open_tx, open_rx) = async_channel::unbounded::<Vec<String>>();
+    let app = application().with_assets(assets::Assets);
+    app.on_open_urls(move |urls| {
+        let _ = open_tx.try_send(urls);
+    });
+    app.run(move |cx: &mut App| {
         // Greyscale text by default: the owner found it far easier to read in dark mode on a
         // QD-OLED panel. MDV_TEXT=system keeps the platform's own smoothing, for comparison.
         if std::env::var("MDV_TEXT").as_deref() != Ok("system") {
@@ -96,6 +91,7 @@ fn main() {
             ])
             .unwrap();
         mdv_reader::ui::init(cx);
+        settings::install(cx);
         tab_move::install(cx);
 
         let bounds = Bounds::centered(None, size(px(w), px(h)), cx);
@@ -105,23 +101,6 @@ fn main() {
             }
             if has("light") {
                 v.mode = Mode::Light;
-            }
-            if has("tabs") || has("toc100k") {
-                let headings = if has("toc100k") { Rc::new(huge(100_000)) } else { Rc::new(kepler()) };
-                v.tabs = vec![
-                    TabData::new("kepler-track.md".into(), "kepler-track.md".into(), headings),
-                    TabData::new("gear-list.md".into(), "gear-list.md".into(), Rc::new(gear())),
-                ];
-                v.current = if has("toc100k") { 50_000 } else { 2 };
-                if has("toc100k") {
-                    v.toc_scroll.scroll_to_item_strict(50_000, gpui::ScrollStrategy::Center);
-                }
-            }
-            // Spike: extra stub tabs by file name, for movement and overflow tests.
-            if let Ok(names) = std::env::var("MDV_TABS") {
-                for name in names.split(',') {
-                    v.tabs.push(TabData::new(name.to_string().into(), name.to_string().into(), Rc::new(kepler())));
-                }
             }
             if has("find") {
                 v.find_open = true;
@@ -147,6 +126,38 @@ fn main() {
         if let Some(owner) = owner {
             tab_move::serve_launches(owner, cx);
         }
+        cx.spawn(async move |cx| {
+            while let Ok(urls) = open_rx.recv().await {
+                let paths: Vec<PathBuf> = urls.iter().filter_map(|u| file_url_path(u)).collect();
+                cx.update(|cx| {
+                    if !paths.is_empty() && tab_move::open_in_front(&paths, cx) {
+                        cx.activate(true);
+                    }
+                });
+            }
+        })
+        .detach();
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_urls() {
+        if cfg!(windows) {
+            return;
+        }
+        assert_eq!(file_url_path("file:///Users/a/My%20Notes%20%C3%A9.md"), Some(PathBuf::from("/Users/a/My Notes é.md")));
+        assert_eq!(file_url_path("FILE://localhost/tmp/a.md"), Some(PathBuf::from("/tmp/a.md")));
+        assert_eq!(file_url_path("file:///tmp/a.md#top"), Some(PathBuf::from("/tmp/a.md")));
+        assert_eq!(file_url_path("file://server/share/a.md"), None);
+        assert_eq!(file_url_path("https://example.com/a.md"), None);
+        assert_eq!(file_url_path("file:///tmp/a%00.md"), None);
+        assert_eq!(file_url_path("file:///tmp/a%zz.md"), None);
+        assert_eq!(file_url_path("file:///tmp/%ff.md"), None);
+        assert_eq!(file_url_path("file://"), None);
+    }
 }

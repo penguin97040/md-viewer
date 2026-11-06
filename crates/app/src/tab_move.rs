@@ -169,6 +169,7 @@ pub fn install(cx: &mut App) {
         registry.open_queue = q.split(',').rev().map(str::to_string).collect();
     }
     cx.set_global(registry);
+    serve_live_reload(cx);
     cx.on_window_closed(|cx, id| {
         let reg = cx.global_mut::<Registry>();
         reg.windows.retain(|w| w.id != id);
@@ -186,6 +187,42 @@ pub fn install(cx: &mut App) {
         }
     })
     .detach();
+}
+
+/// Where file watchers report which tab's file changed.
+static LIVE: std::sync::OnceLock<async_channel::Sender<TabId>> = std::sync::OnceLock::new();
+
+/// Starts the task that turns file changes into reloads. Nothing polls here: the task sleeps on the
+/// channel until a watcher sends.
+fn serve_live_reload(cx: &mut App) {
+    let (tx, rx) = async_channel::unbounded::<TabId>();
+    if LIVE.set(tx).is_err() {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        while let Ok(id) = rx.recv().await {
+            cx.update(|cx| AppView::reload_tab_anywhere(id, crate::view::Reload::Live { retry: true }, cx));
+        }
+    })
+    .detach();
+}
+
+/// A watch on `path` that reports to the live reload task as tab `id`.
+pub fn watch_tab(id: TabId, path: &str) -> Option<crate::watch::Watch> {
+    let tx = LIVE.get()?.clone();
+    Some(crate::watch::Watch::new(path.into(), move || {
+        let _ = tx.try_send(id);
+    }))
+}
+
+/// Every viewer window's view.
+pub fn all_views(cx: &App) -> Vec<Entity<AppView>> {
+    cx.global::<Registry>().windows.iter().filter_map(|w| w.view.upgrade()).collect()
+}
+
+/// The view that holds tab `id` now, wherever the tab has been moved to.
+pub fn view_of_tab(id: TabId, cx: &App) -> Option<Entity<AppView>> {
+    all_views(cx).into_iter().find(|v| v.read(cx).tabs.iter().any(|t| t.id == id))
 }
 
 /// Options shared by the first window and every detached one.
@@ -928,13 +965,21 @@ fn front_view(cx: &App) -> Option<(Entity<AppView>, AnyWindowHandle)> {
 }
 
 fn handle_launch(request: Request, cx: &mut App) {
+    if open_in_front(&request.paths, cx) {
+        request.acknowledge();
+    }
+}
+
+/// Opens files handed over by another launch or by the system, in the most recent window, after the
+/// same checks as any other open. Returns false when there is no window to open them in.
+pub fn open_in_front(paths: &[std::path::PathBuf], cx: &mut App) -> bool {
     let Some((view, handle)) = front_view(cx) else {
         // No window any more: the app is closing. Unanswered, so that launch starts afresh.
-        return;
+        return false;
     };
     let mut opened = 0;
     let mut refused = Vec::new();
-    for path in &request.paths {
+    for path in paths {
         match single_instance::validate_path(path) {
             Ok(path) => {
                 view.update(cx, |v, cx| v.open_path(path, None, cx));
@@ -948,11 +993,11 @@ fn handle_launch(request: Request, cx: &mut App) {
         view.update(cx, |v, cx| v.show_toast(&message, false, cx));
     }
     // A launch with an existing file has already raised that file's window, and the last one wins.
-    if !request.paths.iter().any(|p| single_instance::validate_path(p).is_ok() && is_elsewhere(p, &view, cx)) {
+    if !paths.iter().any(|p| single_instance::validate_path(p).is_ok() && is_elsewhere(p, &view, cx)) {
         handle.update(cx, |_, w, _| w.activate_window()).ok();
     }
-    request.acknowledge();
     log_state("launch", &format!("\"opened\":{opened},\"refused\":{}", refused.len()), cx);
+    true
 }
 
 fn is_elsewhere(path: &std::path::Path, front: &Entity<AppView>, cx: &App) -> bool {

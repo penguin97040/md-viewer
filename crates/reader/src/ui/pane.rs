@@ -131,6 +131,8 @@ pub struct ReaderView {
     pub anchor: (usize, f32),
     text_anchor: Option<(usize, u32, f32)>,
     pending_jump: Option<(usize, u32, f32)>,
+    /// Counts file loads, so that a load overtaken by a later one is dropped.
+    load_gen: u64,
     pending_reveal: Option<(usize, u32)>,
     states: HashMap<usize, ChunkState>,
     area_scroll: HashMap<(usize, u32), f32>,
@@ -224,6 +226,7 @@ impl ReaderView {
             anchor: (0, 0.0),
             text_anchor: None,
             pending_jump: None,
+            load_gen: 0,
             pending_reveal: None,
             states: HashMap::new(),
             area_scroll: HashMap::new(),
@@ -251,9 +254,21 @@ impl ReaderView {
         }
     }
 
-    /// Reads and parses a file off the main thread. A later open replaces an earlier one.
+    /// Reads and parses a file off the main thread. A later open or reload replaces an earlier one.
     pub fn open(&mut self, path: PathBuf, cx: &mut Context<Self>, done: impl FnOnce(&mut Self, Result<(), String>, &mut Context<Self>) + 'static) {
+        self.load(path, false, cx, done);
+    }
+
+    /// Reads the file again and shows it in place of the current text, keeping the reading position.
+    /// If the file cannot be read the current text stays and `done` gets the error.
+    pub fn reload(&mut self, path: PathBuf, cx: &mut Context<Self>, done: impl FnOnce(&mut Self, Result<(), String>, &mut Context<Self>) + 'static) {
+        self.load(path, true, cx, done);
+    }
+
+    fn load(&mut self, path: PathBuf, keep_position: bool, cx: &mut Context<Self>, done: impl FnOnce(&mut Self, Result<(), String>, &mut Context<Self>) + 'static) {
         self.perf.opened_at = Some(Instant::now());
+        self.load_gen += 1;
+        let gen = self.load_gen;
         // On Windows these tasks run in an `extern "system"` thread pool callback, where a panic
         // aborts the process and so closes every window. See also the prefetch and search tasks.
         let task = cx.background_spawn(async move {
@@ -261,16 +276,36 @@ impl ReaderView {
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(d) => {
-                    this.show(Arc::new(d));
-                    done(this, Ok(()), cx);
-                    cx.notify();
+            let _ = this.update(cx, |this, cx| {
+                if this.load_gen != gen {
+                    return;
                 }
-                Err(e) => done(this, Err(e), cx),
+                match result {
+                    Ok(d) => {
+                        if keep_position && this.doc.is_some() {
+                            this.show_keeping_position(Arc::new(d));
+                        } else {
+                            this.show(Arc::new(d));
+                        }
+                        done(this, Ok(()), cx);
+                        cx.notify();
+                    }
+                    Err(e) => done(this, Err(e), cx),
+                }
             });
         })
         .detach();
+    }
+
+    /// `show` for a new version of the same file: the text at the top of the view stays at the top
+    /// where it still exists, and otherwise the same place in the file does.
+    fn show_keeping_position(&mut self, doc: Arc<Document>) {
+        self.capture_text_anchor();
+        let (anchor, text) = (self.anchor, self.text_anchor.take());
+        let chunks = doc.chunks.len();
+        self.show(doc);
+        self.anchor = (anchor.0.min(chunks.saturating_sub(1)), anchor.1);
+        self.text_anchor = text.filter(|t| t.0 < chunks);
     }
 
     pub fn show(&mut self, doc: Arc<Document>) {
@@ -1544,7 +1579,9 @@ impl Element for ReaderElement {
 
         let (hb, v2) = (state.hitbox.clone(), view.clone());
         window.on_mouse_event(move |e: &ScrollEvent, phase, window, cx| {
-            if phase == DispatchPhase::Bubble && hb.is_hovered(window) {
+            // Ctrl (Cmd) with the wheel changes the text size, which the window handles.
+            let zoom = e.modifiers.secondary(cx);
+            if phase == DispatchPhase::Bubble && hb.is_hovered(window) && !zoom {
                 v2.update(cx, |v, cx| {
                     let d = e.delta.pixel_delta(px(WHEEL_LINE));
                     let (dx, dy) = (f32::from(d.x), f32::from(d.y));

@@ -1,4 +1,4 @@
-//! Colour and metric tokens for MD Viewer, shared by every spike crate.
+//! Colour and metric tokens for MD Viewer, shared by every crate.
 //!
 //! Brand values come from `design/tokens.json` through `generated.rs`. Light-theme values and
 //! the ones tokens.json lacks (`--code-text`, `--mark`, `--mark-current`) are copied by hand from

@@ -80,8 +80,9 @@ This rewrites `frontend/theme.css`, `theme_colours.go` and
 
 ## Demo switches (environment variables)
 
-The chrome runs on stub data. `MDV_DEMO` takes a comma list: `tabs`, `light`, `find`, `settings`,
-`tools` (narrow overflow menu), `web`, `toast`, `toc100k` (a 100,000-heading outline).
+`MDV_DEMO` takes a comma list: `light`, `find`, `settings`, `tools` (narrow overflow menu), `web`,
+`toast`. Settings are read from and saved to the real config folder, so set `XDG_CONFIG_HOME` to a
+scratch folder when testing on Linux.
 `MDV_SIZE=800x600` sets the window size, `MDV_PLATFORM=mac` forces the macOS layout, and
 `MDV_PERF=1` prints first-render and TOC row-build timings.
 

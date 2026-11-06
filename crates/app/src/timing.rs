@@ -1,4 +1,4 @@
-//! Spike instrumentation: opt-in start-up timing log.
+//! Opt-in start-up timing log.
 //!
 //! If `MDV_TIMING` names a file, each milestone is appended to it as one line with the wall-clock
 //! time (`epoch_ms`, to line up with the shader lines written by the vendored renderer) and, on
