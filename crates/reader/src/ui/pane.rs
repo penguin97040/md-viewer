@@ -18,6 +18,7 @@ use gpui::{
 use mdv_theme::Mode;
 
 use super::content::{ContentAssets, ContentStore};
+use super::exposure::{A11yFrame, Act, ExposedChunk};
 use super::images::ImageStore;
 use super::shaper::GpuiShaper;
 use crate::doc::Document;
@@ -156,6 +157,13 @@ pub struct ReaderView {
     last_heading: Option<usize>,
     pub perf: Perf,
     pub assets: Option<Arc<dyn Assets + Send + Sync>>,
+    doc_focus: gpui::FocusHandle,
+    a11y: std::rc::Rc<std::cell::RefCell<A11yFrame>>,
+    /// Where the exposed text starts: a chunk and a height in it. Text offsets for assistive
+    /// technology count from here, so it stays put while reading goes forward.
+    a11y_start: Option<(usize, f32)>,
+    a11y_doc: u64,
+    a11y_caret: Option<(usize, u32)>,
 }
 
 impl EventEmitter<ReaderEvent> for ReaderView {}
@@ -208,7 +216,7 @@ const SCROLLBAR: f32 = 12.0;
 const WHEEL_LINE: f32 = 33.3;
 
 impl ReaderView {
-    pub fn new(settings: Settings, _cx: &mut Context<Self>) -> Self {
+    pub fn new(settings: Settings, cx: &mut Context<Self>) -> Self {
         Self {
             doc: None,
             settings,
@@ -248,6 +256,11 @@ impl ReaderView {
             last_heading: None,
             perf: Perf { enabled: std::env::var("MDV_PERF").is_ok(), ..Default::default() },
             assets: None,
+            doc_focus: cx.focus_handle().tab_stop(true),
+            a11y: Default::default(),
+            a11y_start: None,
+            a11y_doc: 0,
+            a11y_caret: None,
         }
     }
 
@@ -676,7 +689,9 @@ impl ReaderView {
         let keep = 6.0 * view_h as f64;
         let (top, bottom) = (self.prefix[first] - keep, self.prefix[last + 1] + keep);
         let prefix = &self.prefix;
-        self.layouts.retain(|i, _| prefix[*i + 1] > top && prefix[*i] < bottom);
+        // What is exposed to assistive technology stays laid out, and that has its own limit.
+        let exposed = self.a11y_start.map_or(usize::MAX, |s| s.0);
+        self.layouts.retain(|i, _| (prefix[*i + 1] > top || *i >= exposed) && prefix[*i] < bottom);
     }
 
     /// Parses the chunks about to come into view on a background thread, and lays out one more
@@ -824,32 +839,80 @@ impl ReaderView {
         Some(DocPos::new(v.chunk as u32, off))
     }
 
-    /// The text of the visible chunks, a line at a time, in window coordinates.
-    fn a11y_lines(&self, bounds: Bounds<Pixels>) -> Vec<A11yLine> {
-        let Some(doc) = self.doc.as_ref() else { return Vec::new() };
+    /// Builds this frame's tree for assistive technology: the structure and text from the start of
+    /// the exposed range to two screens below the view, from what is already laid out.
+    pub(crate) fn expose_to_a11y(&mut self, bounds: Bounds<Pixels>) {
+        /// About this many nodes cost no visible time. Past it, the front of the range goes.
+        const MAX_ITEMS: usize = 3000;
+        let (Some(doc), Some(first)) = (self.doc.clone(), self.visible.first()) else { return };
+        let (first_chunk, first_y) = (first.chunk, first.y);
+        let view_h = f32::from(bounds.size.height);
         let (ox, oy) = (f64::from(f32::from(bounds.origin.x)), f64::from(f32::from(bounds.origin.y)));
-        let mut out = Vec::new();
-        for vis in &self.visible {
-            let content = doc.chunk(vis.chunk);
-            for (li, layer) in vis.layout.layers.iter().enumerate() {
-                for (bi, b) in layer.boxes.iter().enumerate() {
-                    for (ni, line) in b.lines.iter().enumerate() {
-                        let text = content.text.get(line.byte0 as usize..line.byte1 as usize).unwrap_or("").trim_end_matches('\n');
-                        if text.is_empty() {
-                            continue;
-                        }
-                        let y0 = oy + f64::from(vis.y + line.top);
-                        let x0 = ox + f64::from(line.x);
-                        out.push(A11yLine {
-                            key: (vis.chunk, li, bi, ni),
-                            text: text.to_string(),
-                            rect: gpui::accesskit::Rect { x0, y0, x1: x0 + f64::from(line.width), y1: y0 + f64::from(line.height) },
-                        });
-                    }
-                }
+        let near = 2.0 * view_h;
+        let chunk_top = |this: &Self, k: usize| f64::from(first_y) + this.prefix[k] - this.prefix[first_chunk];
+
+        // Two screens above the view, as far as anything is laid out.
+        let mut wanted = (first_chunk, -first_y - near);
+        while wanted.1 < 0.0 && wanted.0 > 0 && self.layouts.contains_key(&(wanted.0 - 1)) {
+            wanted.0 -= 1;
+            wanted.1 += self.known_height(wanted.0);
+        }
+        let wanted = (wanted.0, wanted.1.max(0.0));
+        let stale = doc.id != self.a11y_doc
+            || self.a11y_start.is_none_or(|s| s > wanted || (s.0..first_chunk).any(|k| !self.layouts.contains_key(&k)));
+        if stale {
+            self.a11y_start = Some(wanted);
+            self.a11y_doc = doc.id;
+        }
+        let n = doc.chunks.len();
+        let limit = f64::from(view_h + near);
+        let mut chunks = Vec::new();
+        for attempt in 0..2 {
+            let start = self.a11y_start.unwrap_or(wanted);
+            chunks.clear();
+            let mut budget = MAX_ITEMS;
+            let mut k = start.0;
+            while k < n && chunk_top(self, k) < limit && budget > 0 {
+                let Some(layout) = self.layouts.get(&k).cloned() else { break };
+                let top = chunk_top(self, k);
+                let y0 = if k == start.0 { start.1 } else { f32::MIN };
+                let content = doc.chunk(k);
+                let default = ChunkState::default();
+                let st = self.states.get(&k).unwrap_or(&default);
+                let (items, used) = crate::access::outline(&content, &layout, st, y0, (limit - top) as f32, budget);
+                budget -= used;
+                chunks.push(ExposedChunk { chunk: k, top: oy + top, left: ox, items });
+                k += 1;
+            }
+            if budget > 0 || attempt == 1 {
+                break;
+            }
+            // The range is full: start again from near the view.
+            self.a11y_start = Some(wanted);
+        }
+        let mut frame = self.a11y.borrow_mut();
+        frame.doc_id = doc.id;
+        frame.label = doc.path.as_ref().and_then(|p| p.file_name()).map_or(String::new(), |f| f.to_string_lossy().into_owned());
+        frame.chunks = chunks;
+        frame.caret = self.a11y_caret;
+        frame.view = (oy, oy + f64::from(view_h));
+    }
+
+    /// The screen reader's caret moved. The view follows it.
+    fn a11y_caret_moved(&mut self, chunk: usize, byte: u32) {
+        self.a11y_caret = Some((chunk, byte));
+        self.pending_reveal = Some((chunk, byte));
+    }
+
+    fn a11y_act(&mut self, act: &Act, window: &mut Window, cx: &mut Context<Self>) {
+        match act {
+            Act::Hit(chunk, hit) => self.activate(*chunk, hit, window, cx),
+            Act::Follow(target) => self.follow(target, cx),
+            Act::Reveal(chunk, byte) => {
+                self.pending_reveal = Some((*chunk, *byte));
+                cx.notify();
             }
         }
-        out
     }
 
     pub fn selected_text(&self) -> Option<String> {
@@ -1099,8 +1162,7 @@ impl ReaderView {
             }
             HitKind::Copy { key, text } => {
                 let Some(doc) = self.doc.clone() else { return };
-                let c = doc.chunk(chunk);
-                cx.write_to_clipboard(ClipboardItem::new_string(c.slice(*text).to_string()));
+                cx.write_to_clipboard(ClipboardItem::new_string(doc.code_text(chunk, *text)));
                 self.states.entry(chunk).or_default().copied = Some(*key);
                 self.invalidate_chunk(chunk);
                 let key = *key;
@@ -1440,22 +1502,34 @@ fn same_target(a: &HitKind, b: &HitKind) -> bool {
 
 impl Render for ReaderView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div().flex_1().min_w_0().h_full().child(ReaderElement { a11y_lines: Vec::new(), view: cx.entity() })
+        let frame = self.a11y.clone();
+        let (caret_frame, view) = (self.a11y.clone(), cx.entity());
+        div()
+            .id("reader-document")
+            .role(gpui::accesskit::Role::Document)
+            .track_focus(&self.doc_focus)
+            .a11y_synthetic_children(move |b| frame.borrow_mut().write(b))
+            .on_a11y_action(gpui::accesskit::Action::SetTextSelection, move |data, window, cx| {
+                let Some(gpui::accesskit::ActionData::SetTextSelection(sel)) = data else { return };
+                let moved = caret_frame.borrow().position_of(sel.focus);
+                if let Some((chunk, byte)) = moved {
+                    view.update(cx, |v, cx| {
+                        v.a11y_caret_moved(chunk, byte);
+                        cx.notify();
+                    });
+                    window.refresh();
+                }
+            })
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .child(ReaderElement { view: cx.entity() })
     }
 }
 
 /// The element GPUI lays out and paints. It holds no state of its own.
 pub struct ReaderElement {
     view: Entity<ReaderView>,
-    a11y_lines: Vec<A11yLine>,
-}
-
-/// One laid-out line of text, for assistive technology. A route check, not the full exposure: only
-/// the chunks on screen, flat, with no heading structure, and the Document is not focusable yet.
-struct A11yLine {
-    key: (usize, usize, usize, usize),
-    text: String,
-    rect: gpui::accesskit::Rect,
 }
 
 impl IntoElement for ReaderElement {
@@ -1480,21 +1554,6 @@ impl Element for ReaderElement {
     fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
         None
     }
-    fn a11y_role(&self) -> Option<gpui::accesskit::Role> {
-        Some(gpui::accesskit::Role::Document)
-    }
-    fn a11y_synthetic_children(&mut self, _prepaint: &mut Self::PrepaintState, builder: &mut gpui::A11ySubtreeBuilder) {
-        use gpui::accesskit::{Node, Role};
-        for line in self.a11y_lines.drain(..) {
-            let mut run = Node::new(Role::TextRun);
-            run.set_bounds(line.rect);
-            run.set_character_lengths(line.text.chars().map(|c| c.len_utf8() as u8).collect::<Vec<u8>>());
-            run.set_value(line.text);
-            let id = builder.synthetic_node_id(line.key);
-            builder.push_child(id, run);
-        }
-    }
-
     fn request_layout(&mut self, _id: Option<&GlobalElementId>, _i: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, ()) {
         let style = Style { size: size(gpui::relative(1.0).into(), gpui::relative(1.0).into()), ..Default::default() };
         (window.request_layout(style, None, cx), ())
@@ -1507,11 +1566,7 @@ impl Element for ReaderElement {
             v.watch_assets(cx);
         });
         if window.is_a11y_active() {
-            let t0 = Instant::now();
-            self.a11y_lines = self.view.read(cx).a11y_lines(bounds);
-            if std::env::var_os("MDV_A11Y_PERF").is_some() {
-                eprintln!("[a11y] {} lines in {:?}", self.a11y_lines.len(), t0.elapsed());
-            }
+            self.view.update(cx, |v, _| v.expose_to_a11y(bounds));
         }
         FrameState { hitbox: window.insert_hitbox(bounds, HitboxBehavior::Normal), started }
     }
@@ -1531,6 +1586,16 @@ impl Element for ReaderElement {
             c
         });
         window.set_cursor_style(cursor, &state.hitbox);
+        if window.is_a11y_active() {
+            let actions = self.view.read(cx).a11y.borrow_mut().take_actions();
+            for (id, action, act) in actions {
+                let v2 = view.clone();
+                window.on_a11y_action(id, action, move |_, window, cx| {
+                    v2.update(cx, |v, cx| v.a11y_act(&act, window, cx));
+                    window.refresh();
+                });
+            }
+        }
         // The outline reads this before the reader lays out, so a change needs one more frame.
         let changed = self.view.update(cx, |v, _| {
             let cur = v.current_heading();

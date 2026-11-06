@@ -1,6 +1,7 @@
 //! The on-screen side of the reader: GPUI shaping, the pane, find and the find field.
 
 pub mod content;
+pub mod exposure;
 pub mod field;
 pub mod images;
 pub mod pane;
