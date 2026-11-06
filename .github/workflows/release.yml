@@ -3,6 +3,8 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # A manual run builds and uploads all three platforms as workflow artefacts, versioned 0.0.0-dev.
+  # Only a v* tag runs the release job, so a manual run publishes nothing.
   workflow_dispatch:
 
 # Read only by default; the release job gets what it needs. Actions are
@@ -29,7 +31,7 @@ jobs:
           - name: linux
             os: ubuntu-24.04
           - name: macos
-            os: macos-14
+            os: macos-15
     runs-on: ${{ matrix.os }}
     defaults:
       run:

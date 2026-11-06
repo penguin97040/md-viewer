@@ -1,6 +1,10 @@
 // Resources for md-viewer.exe.
 #define RT_MANIFEST 24
+// build.rs defines MDV_NO_MANIFEST for MSVC, where GPUI's own manifest is linked and a second
+// one is a link error.
+#ifndef MDV_NO_MANIFEST
 1 RT_MANIFEST "app.manifest"
+#endif
 // Icon id 1 is the one Explorer shows for the file.
 1 ICON "../../../assets/icon.ico"
 

@@ -134,13 +134,12 @@ mod shader_compilation {
             ))?,
         };
 
-        if let Some(highest_version) = versions.last() {
-            return Ok(Some(
-                install_folder_bin
-                    .join(highest_version)
-                    .join(arch)
-                    .join(binary),
-            ));
+        // Newest first, and only a version that has the tool: some SDK folders are partial.
+        for version in versions.iter().rev() {
+            let candidate = install_folder_bin.join(version).join(arch).join(binary);
+            if candidate.exists() {
+                return Ok(Some(candidate));
+            }
         }
 
         Ok(None)
@@ -162,8 +161,11 @@ mod shader_compilation {
             .output()
             && output.status.success()
         {
+            // `where.exe` prints one line per match; take the first.
             let path = String::from_utf8_lossy(&output.stdout);
-            return path.trim().to_string();
+            if let Some(first) = path.lines().map(str::trim).find(|l| !l.is_empty()) {
+                return first.to_string();
+            }
         }
 
         if let Ok(Some(path)) = find_latest_windows_sdk_binary("fxc.exe") {

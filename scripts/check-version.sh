@@ -9,6 +9,8 @@ want=${tag#v}
 have=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$root/crates/app/Cargo.toml" | head -n1)
 core=${want%%-*}
 rc=$(sed -n 's/.*VALUE "ProductVersion", "\(.*\)"/\1/p' "$root/crates/app/windows/app.rc" | head -n1)
+mf=$(sed -n 's/.*name="io\.github[^"]*" version="\([0-9.]*\)".*/\1/p' "$root/crates/app/windows/app.manifest" | head -n1)
 [ "$have" = "$want" ] || { echo "tag $tag does not match crates/app/Cargo.toml version $have" >&2; exit 1; }
 [ "$rc" = "$core" ] || { echo "crates/app/windows/app.rc says $rc, expected $core" >&2; exit 1; }
+[ "$mf" = "$core.0" ] || { echo "crates/app/windows/app.manifest says $mf, expected $core.0" >&2; exit 1; }
 echo "version $want ok"
