@@ -1,5 +1,5 @@
-//! Optional merman backend (feature `merman`). Spike code: same inputs and outputs as the
-//! mermaid-rs-renderer path in `mermaid.rs`.
+//! Optional merman backend (feature `merman`): same inputs and outputs as the mermaid-rs-renderer
+//! path in `mermaid.rs`.
 
 use std::sync::OnceLock;
 
@@ -25,7 +25,50 @@ fn init_directive(opts: &DiagramOptions) -> String {
         let c = format!("#{c:06x}");
         vars.push_str(&format!(",\"textColor\":\"{c}\",\"primaryTextColor\":\"{c}\""));
     }
-    format!("%%{{init: {{\"theme\":\"{theme}\",\"htmlLabels\":false,\"flowchart\":{{\"htmlLabels\":false}},\"themeVariables\":{{{vars}}}}}}}%%\n")
+    let mut extra = String::new();
+    if opts.theme == ContentTheme::Dark {
+        vars.push_str(&dark_variables());
+        extra = dark_config();
+    }
+    format!("%%{{init: {{\"theme\":\"{theme}\",{extra}\"htmlLabels\":false,\"flowchart\":{{\"htmlLabels\":false}},\"themeVariables\":{{{vars}}}}}}}%%\n")
+}
+
+fn hex(c: u32) -> String {
+    format!("#{:06x}", c & 0xff_ffff)
+}
+
+/// Quadrant points default to black, which does not show on the dark page.
+fn dark_variables() -> String {
+    let text = hex(mdv_theme::Mode::Dark.palette().text);
+    format!(",\"quadrantPointFill\":\"{text}\",\"quadrantPointTextFill\":\"{text}\"")
+}
+
+/// An external system in C4 is white text on a light grey that is hard to read.
+fn dark_config() -> String {
+    let border = hex(mdv_theme::Mode::Dark.palette().border);
+    format!("\"c4\":{{\"external_person_bg_color\":\"#55555b\",\"external_person_border_color\":\"{border}\",\"external_system_bg_color\":\"#55555b\",\"external_system_border_color\":\"{border}\"}},")
+}
+
+/// Colours merman keeps for two kinds of diagram whatever the theme says: black byte numbers and
+/// light blocks for a packet, and dark grey relationships for C4. Each is an exact string of its
+/// output, so a change in merman leaves the diagram as it was, and a test notices.
+fn repaint_for_dark(svg: String) -> String {
+    let p = mdv_theme::Mode::Dark.palette();
+    let (text, fill, border) = (hex(p.text), hex(p.bg_hover), hex(p.border));
+    let head = &svg[..svg.len().min(512)];
+    if head.contains("aria-roledescription=\"packet\"") {
+        svg.replace(".packetByte.start{fill:black;}", &format!(".packetByte.start{{fill:{text};}}"))
+            .replace(".packetByte.end{fill:black;}", &format!(".packetByte.end{{fill:{text};}}"))
+            .replace(".packetLabel{fill:black;", &format!(".packetLabel{{fill:{text};"))
+            .replace(".packetTitle{fill:black;", &format!(".packetTitle{{fill:{text};"))
+            .replace(".packetBlock{stroke:black;stroke-width:1;fill:#efefef;}", &format!(".packetBlock{{stroke:{border};stroke-width:1;fill:{fill};}}"))
+    } else if head.contains("aria-roledescription=\"c4\"") {
+        svg.replace("fill=\"#444444\"", &format!("fill=\"{text}\""))
+            .replace("stroke=\"#444444\"", &format!("stroke=\"{text}\""))
+            .replace("<path fill=\"black\" stroke=\"#000000\"", &format!("<path fill=\"{text}\" stroke=\"{text}\""))
+    } else {
+        svg
+    }
 }
 
 /// Text is measured with the three embedded fonts only; no system font is read.
@@ -49,6 +92,7 @@ pub(crate) fn render_svg(src: &str, opts: &DiagramOptions, card: Option<u32>) ->
     match out {
         RenderOutput::Document(Some(d)) => Ok(match card {
             Some(c) => with_card(d.svg(), c),
+            None if opts.theme == ContentTheme::Dark => repaint_for_dark(d.svg().to_string()),
             None => d.svg().to_string(),
         }),
         _ => Err(ContentError::Parse("no diagram".into())),
@@ -70,4 +114,33 @@ fn with_card(svg: &str, rgb: u32) -> String {
         return svg.to_string();
     }
     format!("{}><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#{:06x}\"/>{}", root, vb[0], vb[1], vb[2], vb[3], rgb & 0xff_ffff, &svg[end + 1..])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dark(src: &str) -> String {
+        let opts = DiagramOptions { theme: ContentTheme::Dark, ..Default::default() };
+        render_svg(src, &opts, None).expect("diagram")
+    }
+
+    #[test]
+    fn packet_is_themed_in_dark_mode() {
+        let svg = dark("packet-beta\n  0-15: \"Source\"\n  16-31: \"Destination\"\n");
+        assert!(!svg.contains("fill:#efefef") && !svg.contains(".packetByte.start{fill:black"), "{}", &svg[..800.min(svg.len())]);
+    }
+
+    #[test]
+    fn c4_relationships_are_themed_in_dark_mode() {
+        let svg = dark("C4Context\n  Person(a, \"A\", \"x\")\n  System(b, \"B\", \"y\")\n  Rel(a, b, \"Uses\")\n");
+        assert!(!svg.contains("#444444"));
+    }
+
+    #[test]
+    fn quadrant_points_show_in_dark_mode() {
+        let svg = dark("quadrantChart\n  title T\n  quadrant-1 A\n  Point: [0.3, 0.6]\n");
+        let fill = hex(mdv_theme::Mode::Dark.palette().text);
+        assert!(svg.contains(&fill));
+    }
 }

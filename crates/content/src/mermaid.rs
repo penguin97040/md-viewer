@@ -130,9 +130,10 @@ fn kind(src: &str) -> String {
 
 /// mermaid-rs-renderer writes some light-theme colours into the SVG as literals (quadrant text
 /// `#131300`, timeline pastel boxes under theme text, C4 labels). In dark mode these are drawn in
-/// the light scheme on a light card instead of unreadable text on black.
+/// the light scheme on a light card instead of unreadable text on black. merman takes colours for
+/// all of them, so with it there is no card (see `dark_variables` in `merman_backend`).
 fn hard_codes_light_colours(k: &str) -> bool {
-    k.starts_with("quadrantchart") || k.starts_with("timeline") || k.starts_with("c4") || (cfg!(feature = "merman") && k.starts_with("packet"))
+    !cfg!(feature = "merman") && (k.starts_with("quadrantchart") || k.starts_with("timeline") || k.starts_with("c4"))
 }
 
 fn options(opts: &DiagramOptions, card: bool) -> RenderOptions {
