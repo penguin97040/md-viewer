@@ -41,6 +41,9 @@ screen-capture = [
     "scap",
 ]
 test-support = ["gpui/test-support"]
+# Builds every shader with fxc.exe (Windows SDK, Windows host only) and links the bytecode in,
+# instead of compiling at start-up with d3dcompiler_47.dll and keeping a disk store.
+precompiled-shaders = []
 
 [lib]
 name = "gpui_windows"

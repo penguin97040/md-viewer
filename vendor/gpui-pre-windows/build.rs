@@ -1,17 +1,50 @@
 #![allow(clippy::disallowed_methods, reason = "build scripts are exempt")]
 
+//! Shader bytecode comes from one of two places.
+//!
+//! * Default: the app compiles the embedded HLSL when it starts, with the system
+//!   `d3dcompiler_47.dll`. This is what a cross-build from Linux gets, since there is no `fxc.exe`
+//!   there to precompile with.
+//! * Feature `precompiled-shaders`: this script compiles every shader with `fxc.exe` from the
+//!   Windows SDK and the bytecode is built into the executable. It needs a Windows host.
+//!
+//! Setting `MDV_REQUIRE_PRECOMPILED_SHADERS` makes a build without the feature fail, so a release
+//! cannot be made with run-time compilation by accident.
+
 fn main() {
-    #[cfg(not(all(target_os = "windows", not(debug_assertions))))]
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=MDV_REQUIRE_PRECOMPILED_SHADERS");
+    println!("cargo:rerun-if-env-changed=GPUI_FXC_PATH");
+
+    let precompiled = std::env::var_os("CARGO_FEATURE_PRECOMPILED_SHADERS").is_some();
+    let required = std::env::var_os("MDV_REQUIRE_PRECOMPILED_SHADERS")
+        .is_some_and(|v| !v.is_empty() && v != "0");
+    let target_windows = std::env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "windows");
+    if !target_windows {
+        return;
+    }
+    if required && !precompiled {
+        println!(
+            "cargo::error=MDV_REQUIRE_PRECOMPILED_SHADERS is set but the precompiled-shaders feature is off, \
+             so this build would compile shaders when the app starts"
+        );
+        std::process::exit(1);
+    }
+    if !precompiled {
+        return;
+    }
     #[cfg(target_os = "windows")]
+    shader_compilation::compile_shaders();
+    #[cfg(not(target_os = "windows"))]
     {
-        // Compile HLSL shaders
-        #[cfg(not(debug_assertions))]
-        compile_shaders();
+        println!(
+            "cargo::error=precompiled-shaders needs a Windows host, because it runs fxc.exe from the Windows SDK"
+        );
+        std::process::exit(1);
     }
 }
 
-#[cfg(all(target_os = "windows", not(debug_assertions)))]
+#[cfg(target_os = "windows")]
 mod shader_compilation {
     use std::{
         fs,
@@ -239,6 +272,3 @@ mod shader_compilation {
             .expect("Failed to write Rust binding file");
     }
 }
-
-#[cfg(all(target_os = "windows", not(debug_assertions)))]
-use shader_compilation::compile_shaders;

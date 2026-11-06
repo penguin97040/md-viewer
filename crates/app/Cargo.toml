@@ -19,5 +19,13 @@ mdv-print.workspace = true
 raw-window-handle.workspace = true
 async-channel.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+gpui-pre-windows = { version = "=0.3.11", default-features = false }
+
+[features]
+# Windows releases: build the shaders with fxc.exe on a Windows host, so the exe never compiles
+# them at start-up. Without it the exe compiles with d3dcompiler_47.dll (the Linux cross-build).
+precompiled-shaders = ["gpui-pre-windows/precompiled-shaders"]
+
 [build-dependencies]
 embed-resource.workspace = true
