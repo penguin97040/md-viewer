@@ -22,6 +22,12 @@ Pinned stack: `gpui-pre =0.3.11` and `gpui-pre-platform =0.3.11` (a snapshot of 
 published on crates.io, Apache-2.0). Every dependency is pinned with `=` in the root
 `Cargo.toml`, and `Cargo.lock` is committed. CI builds with `--locked`.
 
+## Graphics requirements
+
+GPUI draws on the GPU, so the app needs a working driver at run time: Direct3D 11 on Windows,
+Vulkan on Linux (with X11 or Wayland), Metal on macOS. A software Vulkan driver such as Mesa's
+lavapipe works, only slowly. There is no web view, so neither WebView2 nor WebKitGTK is needed.
+
 ## Build on Linux
 
 Packages (Ubuntu 24.04 or later):
