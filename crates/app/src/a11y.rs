@@ -53,15 +53,15 @@ pub fn input_text(text: String) -> impl FnOnce(&mut A11ySubtreeBuilder<'_>) + 's
     }
 }
 
-// ---- the document sample (MDV_A11Y_DOC=<paragraphs>) -------------------------------------------
+// ---- the document sample (with `dev-harness`) -------------------------------------------
 
 const ROW: f32 = 28.0;
-/// Measured at about 3,000 paragraphs with no visible CPU cost (see the spike report).
+/// Measured at about 3,000 paragraphs with no visible CPU cost.
 const MAX_EXPOSED: usize = 3000;
 
 pub struct DocSample {
     pub paragraphs: usize,
-    /// Paragraphs exposed either side of the viewport (`MDV_A11Y_OVERSCAN`).
+    /// Paragraphs exposed either side of the viewport.
     pub overscan: usize,
     pub scroll: UniformListScrollHandle,
     pub visible: Rc<RefCell<Range<usize>>>,
@@ -75,8 +75,7 @@ pub struct DocSample {
 
 impl DocSample {
     pub fn from_env() -> Option<Self> {
-        let paragraphs = std::env::var("MDV_A11Y_DOC").ok()?.parse().ok()?;
-        let overscan = std::env::var("MDV_A11Y_OVERSCAN").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
+        let (paragraphs, overscan) = crate::harness::a11y_sample()?;
         Some(Self { paragraphs, overscan, scroll: UniformListScrollHandle::new(), visible: Rc::default(), caret: Rc::default(), runs: Rc::default(), window_start: Cell::new(0) })
     }
 }

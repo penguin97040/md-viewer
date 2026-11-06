@@ -15,7 +15,6 @@ use std::sync::Arc;
 
 mod guard;
 mod math;
-#[cfg(feature = "merman")]
 mod merman_backend;
 mod mermaid;
 mod raster;
@@ -119,7 +118,7 @@ impl fmt::Display for ContentError {
 
 impl std::error::Error for ContentError {}
 
-/// Limits added by this crate. Values were chosen from the measurements in the spike report.
+/// Limits added by this crate. Values were chosen from measurements.
 pub mod limits {
     use std::time::Duration;
     /// Maths source length in bytes.

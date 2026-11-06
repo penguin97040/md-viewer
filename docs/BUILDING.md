@@ -78,9 +78,14 @@ python3 scripts/generate-theme.py
 This rewrites `frontend/theme.css`, `theme_colours.go` and
 `spike-gpui/crates/theme/src/generated.rs`. The first two must stay byte-identical.
 
-## Demo switches (environment variables)
+## Test switches (environment variables)
 
-The chrome runs on stub data. `MDV_DEMO` takes a comma list: `tabs`, `light`, `find`, `settings`,
+These exist only in a build with `--features dev-harness`. A default build reads no `MDV_` variable
+at all, so never ship one built with the feature: `MDV_SCRIPT` runs a script of commands, including
+shell commands. They're all in `crates/app/src/harness.rs`, `crates/app/src/demo.rs` and
+`crates/reader/src/ui/script.rs`.
+
+`MDV_DEMO` runs the chrome on stub data and takes a comma list: `tabs`, `light`, `find`, `settings`,
 `tools` (narrow overflow menu), `web`, `toast`, `toc100k` (a 100,000-heading outline).
 `MDV_SIZE=800x600` sets the window size, `MDV_PLATFORM=mac` forces the macOS layout, and
 `MDV_PERF=1` prints first-render and TOC row-build timings.

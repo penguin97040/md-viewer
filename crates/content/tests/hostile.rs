@@ -2,7 +2,7 @@
 //! passing condition is that this test is still alive afterwards, and later renders still work. Run
 //! it under a memory limit to see allocation failures for what they are:
 //!
-//! (ulimit -v 12000000; cargo test -p mdv-content --features merman --test hostile -- --nocapture)
+//! (ulimit -v 14000000; cargo test -p mdv-content --test hostile -- --nocapture)
 
 use std::time::{Duration, Instant};
 

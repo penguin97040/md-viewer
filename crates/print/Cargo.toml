@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 mdv-theme.workspace = true
 mdv-reader = { path = "../reader", default-features = false }
-mdv-content = { path = "../content", features = ["merman"] }
+mdv-content.workspace = true
 mdv-webimage.workspace = true
 krilla.workspace = true
 krilla-svg.workspace = true

@@ -243,7 +243,6 @@ impl DirectXRenderer {
 
     #[inline]
     fn present(&mut self) -> Result<()> {
-        let trace = crate::spike_trace::start(); // spike instrumentation: any wait in `Present`
         let result = unsafe {
             self.resources
                 .as_ref()
@@ -251,7 +250,6 @@ impl DirectXRenderer {
                 .swap_chain
                 .Present(0, DXGI_PRESENT(0))
         };
-        crate::spike_trace::span("present", self.hwnd, 0, trace);
         result.ok().context("Presenting swap chain failed")
     }
 
@@ -942,20 +940,16 @@ impl DirectXResources {
 }
 
 impl DirectXRenderPipelines {
-    /// Spike patch: times the build for `MDV_TIMING`, so the log shows what a window costs now
-    /// that the bytecode is shared (see `shader_resources::RawShaderBytes`).
+    /// Shader bytecode is shared by the whole process: see `shader_resources::RawShaderBytes`.
     pub fn new(device: &ID3D11Device) -> Result<Self> {
-        let started = std::time::Instant::now();
-        let built = match Self::build(device) {
+        match Self::build(device) {
             // The device refused bytecode read from disk: compile, and overwrite what is there.
             Err(err) if shader_resources::forget_disk_shaders() => {
                 log::warn!("Stored shaders refused, compiling: {err:#}");
                 Self::build(device)
             }
             built => built,
-        };
-        spike_timing::record_pipelines(started.elapsed());
-        built
+        }
     }
 
     fn build(device: &ID3D11Device) -> Result<Self> {
@@ -1712,61 +1706,6 @@ fn report_live_objects(device: &ID3D11Device) -> Result<()> {
 
 const BUFFER_COUNT: usize = 3;
 
-/// Spike instrumentation: when `MDV_TIMING` names a file, append one line per shader compile
-/// (with a running total). Does nothing when the variable is unset.
-pub(crate) mod spike_timing {
-    use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::Duration;
-
-    static TOTAL_NANOS: AtomicU64 = AtomicU64::new(0);
-
-    static COMPILES: AtomicU64 = AtomicU64::new(0);
-
-    /// One line per renderer built: only the first window in a process should have compiled.
-    pub(crate) fn record_pipelines(took: Duration) {
-        let Some(path) = std::env::var_os("MDV_TIMING") else { return };
-        append(
-            &path,
-            &format!(
-                "pipelines_ms={:.2} compiles_so_far={}",
-                took.as_secs_f64() * 1000.0,
-                COMPILES.load(Ordering::Relaxed)
-            ),
-        );
-    }
-
-    pub(crate) fn record_disk_shader(entry: &str) {
-        let Some(path) = std::env::var_os("MDV_TIMING") else { return };
-        append(&path, &format!("shader={entry} from_disk=1"));
-    }
-
-    pub(crate) fn record_shader(entry: &str, took: Duration) {
-        let Some(path) = std::env::var_os("MDV_TIMING") else { return };
-        COMPILES.fetch_add(1, Ordering::Relaxed);
-        let total = TOTAL_NANOS.fetch_add(took.as_nanos() as u64, Ordering::Relaxed) + took.as_nanos() as u64;
-        append(
-            &path,
-            &format!(
-                "shader={} compile_ms={:.2} shader_total_ms={:.2}",
-                entry.trim_end_matches('\0'),
-                took.as_secs_f64() * 1000.0,
-                total as f64 / 1.0e6
-            ),
-        );
-    }
-
-    fn append(path: &std::ffi::OsStr, line: &str) {
-        let epoch_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs_f64() * 1000.0)
-            .unwrap_or(0.0);
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(f, "epoch_ms={epoch_ms:.1} {line}");
-        }
-    }
-}
-
 pub(crate) mod shader_resources {
     use std::marker::PhantomData;
     use std::path::PathBuf;
@@ -1774,7 +1713,6 @@ pub(crate) mod shader_resources {
     use std::sync::{Arc, Mutex};
 
     use anyhow::Result;
-    use super::spike_timing;
 
     #[cfg(all())]
     use windows::{
@@ -1804,7 +1742,7 @@ pub(crate) mod shader_resources {
         Fragment,
     }
 
-    /// Spike patch: compiled bytecode shared by the whole process. Pipelines are built per renderer
+    /// Patch: compiled bytecode shared by the whole process. Pipelines are built per renderer
     /// and so per window, and again after a lost device, but bytecode depends on neither.
     static BYTECODE: Mutex<Vec<(ShaderModule, ShaderTarget, Arc<[u8]>)>> = Mutex::new(Vec::new());
 
@@ -1887,11 +1825,7 @@ pub(crate) mod shader_resources {
     static READ_FROM_DISK: AtomicBool = AtomicBool::new(false);
     static IGNORE_DISK: AtomicBool = AtomicBool::new(false);
 
-    /// `MDV_NO_SHADER_DISK` turns the store off, to compare a cold start.
     fn disk_dir() -> Option<PathBuf> {
-        if std::env::var_os("MDV_NO_SHADER_DISK").is_some() {
-            return None;
-        }
         let base = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
         Some(base.join("md-viewer").join("shader-cache"))
     }
@@ -1923,7 +1857,6 @@ pub(crate) mod shader_resources {
         if let Some(dir) = dir.as_ref().filter(|_| !IGNORE_DISK.load(Ordering::Relaxed)) {
             if let Some(bytes) = crate::shader_disk::read(dir, key) {
                 READ_FROM_DISK.store(true, Ordering::Relaxed);
-                spike_timing::record_disk_shader(&name);
                 return Ok(Arc::from(bytes));
             }
         }
@@ -1966,7 +1899,7 @@ pub(crate) mod shader_resources {
                 ShaderTarget::Fragment => "ps_4_1\0",
             };
 
-            // Spike patch: compile the embedded HLSL at start-up with the OS d3dcompiler_47.dll,
+            // Patch: compile the embedded HLSL at start-up with the OS d3dcompiler_47.dll,
             // because cross-compiling from Linux has no fxc.exe to precompile the shaders.
             let mut compile_blob = None;
             let mut error_blob = None;
@@ -1975,7 +1908,6 @@ pub(crate) mod shader_resources {
             let entry_point = PCSTR::from_raw(entry.as_ptr());
             let target_cstr = PCSTR::from_raw(target.as_ptr());
 
-            let timing_start = std::time::Instant::now();
             let ret = D3DCompile(
                 source.as_ptr() as *const core::ffi::c_void,
                 source.len(),
@@ -1989,7 +1921,6 @@ pub(crate) mod shader_resources {
                 &mut compile_blob,
                 Some(&mut error_blob),
             );
-            spike_timing::record_shader(&entry, timing_start.elapsed());
             if ret.is_err() {
                 let Some(error_blob) = error_blob else {
                     return Err(anyhow::anyhow!("{ret:?}"));

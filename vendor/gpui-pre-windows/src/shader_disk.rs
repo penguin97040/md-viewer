@@ -1,4 +1,4 @@
-//! Spike patch: compiled shader bytecode kept on disk, so a later launch skips `D3DCompile`.
+//! Patch: compiled shader bytecode kept on disk, so a later launch skips `D3DCompile`.
 //!
 //! Plain `std`, so its checks can be tested off Windows. The checksum catches damage and foreign
 //! files. It is not a signature, so the directory is trusted as far as the user's own profile is.

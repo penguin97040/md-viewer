@@ -152,7 +152,7 @@ impl AppView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             mode: Mode::Dark,
-            mac: cfg!(target_os = "macos") || std::env::var("MDV_PLATFORM").as_deref() == Ok("mac"),
+            mac: cfg!(target_os = "macos") || crate::harness::mac_layout(),
             tabs: Vec::new(),
             active: 0,
             toc_open: true,
@@ -176,7 +176,7 @@ impl AppView {
             drag_thumb: None,
             hover: None,
             should_move: false,
-            perf: std::env::var("MDV_PERF").is_ok(),
+            perf: crate::harness::perf(),
             started: Instant::now(),
             first_render_logged: false,
             tab_scroll: ScrollHandle::new(),
@@ -336,7 +336,7 @@ impl AppView {
         self.active = self.tabs.len() - 1;
         self.load_active_state();
         if first {
-            mdv_reader::ui::script::start(reader.clone(), cx);
+            crate::harness::start_script(reader.clone(), cx);
         }
         let app = cx.entity().downgrade();
         reader.update(cx, |r, cx| {
@@ -1675,7 +1675,7 @@ impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.first_render_logged {
             self.first_render_logged = true;
-            if std::env::var_os("MDV_TIMING").is_some() {
+            if crate::harness::timing().is_some() {
                 crate::timing::log("first_render_started");
                 window.on_next_frame(|_, _| crate::timing::log("first_frame_painted_approx"));
                 window.refresh();

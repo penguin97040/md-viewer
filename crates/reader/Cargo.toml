@@ -5,11 +5,9 @@ edition.workspace = true
 publish.workspace = true
 
 [features]
-default = ["ui", "merman"]
+default = ["ui"]
 # The on-screen view. Without it the crate is the document model and parser alone, with no GPUI.
 ui = ["dep:gpui", "dep:mdv-content", "dep:mdv-webimage"]
-# Draw diagrams with merman instead of mermaid-rs-renderer (the content crate picks one at build time).
-merman = ["mdv-content?/merman"]
 # Test switches read from the environment. Never in a build anyone is given.
 dev-harness = []
 

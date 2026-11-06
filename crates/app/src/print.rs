@@ -2,7 +2,7 @@
 //! tab to a PDF off the UI thread behind the progress toast with Cancel. On success the toast
 //! offers Open, which hands the file to the system's PDF viewer (see `mdv_print::handoff`).
 //!
-//! `MDV_PRINT_SAVE_TO=<path>` stands in for the dialog in tests; `MDV_PRINT_SAVE_TO=-` stands in
+//! With `dev-harness`, a path can stand in for the dialog in tests, and `-` stands in
 //! for cancelling it.
 
 use std::path::{Path, PathBuf};
@@ -59,7 +59,7 @@ impl AppView {
         let doc_id = doc.id;
         self.print = Some(Running { job: None, reader });
         // Ask first: nothing is built until there is somewhere to put it.
-        let asked: Result<Option<PathBuf>, String> = match std::env::var_os("MDV_PRINT_SAVE_TO") {
+        let asked: Result<Option<PathBuf>, String> = match crate::harness::print_save_to() {
             Some(v) if v == "-" => Ok(None),
             Some(v) => Ok(Some(PathBuf::from(v))),
             None => {

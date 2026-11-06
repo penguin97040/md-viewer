@@ -160,12 +160,12 @@ impl Global for Registry {}
 /// One-time set-up: the registry, and quitting when the last window closes.
 pub fn install(cx: &mut App) {
     let mut registry = Registry::default();
-    if let Ok(path) = std::env::var("MDV_TAB_LOG") {
+    if let Some(path) = crate::harness::tab_log() {
         registry.log = File::create(path).ok();
     }
     registry.started = Some(Instant::now());
-    if let Ok(q) = std::env::var("MDV_OPEN_QUEUE") {
-        registry.open_queue = q.split(',').rev().map(str::to_string).collect();
+    if let Some(q) = crate::harness::open_queue() {
+        registry.open_queue = q.to_string_lossy().split(',').rev().map(str::to_string).collect();
     }
     cx.set_global(registry);
     cx.on_window_closed(|cx, id| {
@@ -778,7 +778,7 @@ fn reorder(source: usize, tab: TabId, index: usize, cx: &mut App) {
 }
 
 fn fault(name: &str) -> bool {
-    std::env::var("MDV_FAULT").is_ok_and(|f| f.split(',').any(|x| x == name))
+    crate::harness::tab_move_fault(name)
 }
 
 fn merge(source: usize, tab: TabId, dest: usize, index: usize, cx: &mut App) {
@@ -965,7 +965,7 @@ fn is_elsewhere(path: &std::path::Path, front: &Entity<AppView>, cx: &App) -> bo
 // ---- one tab per file ----------------------------------------------------------------------------
 
 /// Opens `path` in the front window, unless a tab anywhere already has it, in which case that tab
-/// and its window come forward. Reached with Ctrl+O when `MDV_OPEN_QUEUE` is set.
+/// and its window come forward. Reached with Ctrl+O when the test harness set a queue.
 pub fn open_next_from_queue(this: &mut AppView, cx: &mut gpui::Context<AppView>) -> bool {
     let Some(path) = cx.global_mut::<Registry>().open_queue.pop() else { return false };
     let me = cx.entity();
@@ -1037,7 +1037,7 @@ fn log_state_soon(event: &'static str, extra: String, cx: &mut App) {
 
 // ---- evidence log --------------------------------------------------------------------------------
 
-/// With `MDV_TAB_LOG`, appends one JSON line per state change. This is how the tests read the model
+/// With the test harness's log, appends one JSON line per state change. This is how the tests read the model
 /// after real input; it never drives anything.
 pub fn log_state(event: &str, extra: &str, cx: &mut App) {
     if cx.global::<Registry>().log.is_none() {

@@ -5,6 +5,7 @@ pub mod crash;
 pub mod field;
 pub mod images;
 pub mod pane;
+#[cfg(feature = "dev-harness")]
 pub mod script;
 pub mod shaper;
 
