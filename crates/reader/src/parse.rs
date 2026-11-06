@@ -1522,7 +1522,7 @@ fn finish_wrap(top: Open, depth: usize) -> Vec<Inline> {
 
 /// Clamps the spans of the last inline chain after trailing white space was removed.
 fn shrink_to(content: &mut [Inline], end: u32) {
-    // Not only the last: empty maths after a soft break sits past the space being dropped.
+    // Not only the last: empty maths or an image after a soft break sits past the space being dropped.
     for x in content.iter_mut().rev() {
         match x {
             Inline::Text(s) | Inline::Code(s) | Inline::Math { text: s, .. } => {
@@ -1533,7 +1533,17 @@ fn shrink_to(content: &mut [Inline], end: u32) {
                 }
             }
             Inline::Styled { content, .. } | Inline::Link { content, .. } => shrink_to(content, end),
-            _ => return,
+            // An image can sit past the space too, with a span of nothing, or none.
+            Inline::Image(img) => {
+                if let Some(s) = &mut img.alt_text {
+                    s.start = s.start.min(end);
+                    s.end = s.end.min(end);
+                    if s.start < end {
+                        return;
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }

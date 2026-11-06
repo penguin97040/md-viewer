@@ -54,11 +54,13 @@ pub struct PrintOptions {
     /// The reader's line-height setting.
     pub line_height: f32,
     pub title: Option<String>,
+    /// The reader has agreed to load this document's web images.
+    pub web_images: bool,
 }
 
 impl Default for PrintOptions {
     fn default() -> Self {
-        Self { page: PageSize::A4, serif: false, line_height: 1.65, title: None }
+        Self { page: PageSize::A4, serif: false, line_height: 1.65, title: None, web_images: false }
     }
 }
 
@@ -191,7 +193,7 @@ fn render_inner(doc: &Document, opts: &PrintOptions, ctl: &mut dyn FnMut(Progres
             return Err(PrintError::Cancelled);
         }
         let c = doc.chunk(i);
-        let a = assets::PrintAssets { store: &store, document: doc.path.as_deref() };
+        let a = assets::PrintAssets { store: &store, document: doc.path.as_deref(), web_images: opts.web_images };
         let l = lay(&c, &lo, i == 0, i + 1 == n, &mut shaper, &a);
         plan.add_chunk(i, &c, &l);
     }
@@ -210,7 +212,7 @@ fn render_inner(doc: &Document, opts: &PrintOptions, ctl: &mut dyn FnMut(Progres
         let mut get = |chunk: usize| {
             if cache.as_ref().map(|c| c.0) != Some(chunk) {
                 let c = doc.chunk(chunk);
-                let a = assets::PrintAssets { store: &store, document: doc.path.as_deref() };
+                let a = assets::PrintAssets { store: &store, document: doc.path.as_deref(), web_images: opts.web_images };
                 let mut sh = shape::PdfShaper::new(&fonts);
                 let l = lay(&c, &lo, chunk == 0, chunk + 1 == n, &mut sh, &a);
                 cache = Some((chunk, c, Arc::new(l)));

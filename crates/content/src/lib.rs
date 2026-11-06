@@ -2,27 +2,26 @@
 //!
 //! * [`render_math`] typesets LaTeX with RaTeX (KaTeX-compatible), emitting glyph outlines as
 //!   `<path>` elements so the SVG needs no fonts, CSS or web fonts.
-//! * [`render_mermaid`] draws Mermaid text with `mermaid-rs-renderer`, then checks the SVG against
-//!   an allow-list ([`svgcheck`]) before returning it.
+//! * [`render_mermaid`] draws Mermaid text with merman, then checks the SVG against an allow-list
+//!   ([`svgcheck`]) before returning it.
 //! * [`rasterise`] turns either asset into RGBA pixels with resvg, using only fonts embedded in
 //!   this crate (never system fonts), so output is identical on every machine.
 //!
 //! Every entry point returns an error instead of panicking, runs on a worker thread with a time
-//! budget, and leaves later calls working (the job queue in `frontend/extras.js` relies on the
-//! same property through `.catch()`).
+//! budget, and leaves later calls working.
 
 use std::fmt;
 use std::sync::Arc;
 
 mod guard;
 mod math;
-#[cfg(feature = "merman")]
 mod merman_backend;
 mod mermaid;
 mod raster;
 pub mod svgcheck;
 
-pub use raster::{boost_light_on_dark, rasterise, RgbaImage};
+pub use guard::{new_render_owner, set_render_owner};
+pub use raster::{boost_light_on_dark, rasterise, render_svg_image, RgbaImage, SvgImage};
 
 /// Colour scheme of a rendered asset. `Print` is the light scheme with pure-black text and no
 /// background, matching `printDiagrams` in `frontend/extras.js`.
@@ -93,6 +92,8 @@ pub enum ContentError {
     TooLarge(String),
     /// Rendering did not finish inside the time budget.
     Timeout,
+    /// Too many earlier renders are still running. Worth asking again later, unlike the others.
+    Busy,
     /// The renderer panicked; the panic was contained.
     Panic(String),
     /// The generated SVG failed the safety check.
@@ -107,6 +108,7 @@ impl fmt::Display for ContentError {
             ContentError::Parse(m) => write!(f, "{m}"),
             ContentError::TooLarge(m) => write!(f, "too large: {m}"),
             ContentError::Timeout => write!(f, "took too long to render"),
+            ContentError::Busy => write!(f, "too many earlier renders are still running"),
             ContentError::Panic(m) => write!(f, "renderer failed: {m}"),
             ContentError::Unsafe(m) => write!(f, "unsafe SVG rejected: {m}"),
             ContentError::Raster(m) => write!(f, "could not rasterise: {m}"),
@@ -116,7 +118,7 @@ impl fmt::Display for ContentError {
 
 impl std::error::Error for ContentError {}
 
-/// Limits added by this crate. Values were chosen from the measurements in the spike report.
+/// Limits added by this crate. Values were chosen from measurements.
 pub mod limits {
     use std::time::Duration;
     /// Maths source length in bytes.
@@ -143,10 +145,22 @@ pub mod limits {
     pub const MAX_DIAGRAM_PX: f32 = 20_000.0;
     /// Largest raster side in pixels.
     pub const MAX_RASTER_PX: u32 = 16_384;
+    /// Pixels in one raster. Allocation failure ends the process, so this comes before the memory:
+    /// a page's worth of side on each axis would otherwise be 1 GB.
+    pub const MAX_RASTER_PIXELS: u64 = 100_000_000;
+    /// The largest SVG image file: the same as for any other image.
+    pub const MAX_SVG_IMAGE_BYTES: usize = 25 << 20;
+    /// Pixels in the raster of one SVG image. A larger one is drawn more coarsely, not refused.
+    pub const MAX_SVG_IMAGE_PIXELS: f32 = 24_000_000.0;
     pub const MATH_BUDGET: Duration = Duration::from_millis(2_000);
     pub const MERMAID_BUDGET: Duration = Duration::from_millis(5_000);
-    /// Render threads allowed to be still running after their budget expired.
-    pub const MAX_ABANDONED: usize = 3;
+    /// Threads rendering diagrams and SVG images at once, across all documents, including any
+    /// still running after their budget expired. They can't be stopped from outside.
+    pub const MAX_DIAGRAM_THREADS: usize = 16;
+    /// The same for maths, which is quick and has a smaller budget.
+    pub const MAX_MATH_THREADS: usize = 8;
+    /// Threads past their budget that one document can hold of each kind.
+    pub const MAX_STUCK_PER_DOCUMENT: usize = 6;
     /// Worker thread stack size. RaTeX has its own depth budget; this is a second line of defence.
     pub const WORKER_STACK: usize = 64 * 1024 * 1024;
 }

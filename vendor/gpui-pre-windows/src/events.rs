@@ -85,8 +85,6 @@ impl WindowsWindowInner {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
-        // Timing instrumentation, see `mdv_trace`.
-        let trace = crate::mdv_trace::message_begins(handle, msg, wparam, lparam);
         let handled = match msg {
             // `DefWindowProc` answers `MA_NOACTIVATE` for a left click on `HTCAPTION`.
             // The activation is only triggered when `DefWindowProc` handles the following `WM_NCLBUTTONDOWN`.
@@ -120,11 +118,7 @@ impl WindowsWindowInner {
                 self.handle_nc_mouse_down_msg(handle, MouseButton::Left, wparam, lparam)
             }
             WM_NCLBUTTONDOWN => {
-                let handled = self.handle_nc_mouse_down_msg(handle, MouseButton::Left, wparam, lparam);
-                if handled.is_none() {
-                    crate::mdv_trace::nudge_caption_press(handle, wparam);
-                }
-                handled
+                self.handle_nc_mouse_down_msg(handle, MouseButton::Left, wparam, lparam)
             }
             WM_NCRBUTTONDOWN => {
                 self.handle_nc_mouse_down_msg(handle, MouseButton::Right, wparam, lparam)
@@ -171,13 +165,11 @@ impl WindowsWindowInner {
             | WM_GPUI_GPU_DEVICE_LOST => self.handle_gpui_events(handle, msg, wparam, lparam),
             _ => None,
         };
-        let result = if let Some(n) = handled {
+        if let Some(n) = handled {
             LRESULT(n)
         } else {
             unsafe { DefWindowProcW(handle, msg, wparam, lparam) }
-        };
-        crate::mdv_trace::message_ends(handle, msg, trace);
-        result
+        }
     }
 
     fn handle_move_msg(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
@@ -806,7 +798,7 @@ impl WindowsWindowInner {
         }
     }
 
-    fn handle_activate_msg(self: &Rc<Self>, handle: HWND, wparam: WPARAM) -> Option<isize> {
+    fn handle_activate_msg(self: &Rc<Self>, _handle: HWND, wparam: WPARAM) -> Option<isize> {
         let activated = wparam.loword() > 0;
 
         let events = self
@@ -842,16 +834,12 @@ impl WindowsWindowInner {
                 this.state.callbacks.input.set(Some(func));
             }
         }
-
-        let trace_window = SafeHwnd::from(handle);
         self.executor
             .spawn(async move {
-                let trace = crate::mdv_trace::start();
                 if let Some(mut func) = this.state.callbacks.active_status_change.take() {
                     func(activated);
                     this.state.callbacks.active_status_change.set(Some(func));
                 }
-                crate::mdv_trace::span("active_status_change", trace_window.as_raw(), activated as i64, trace);
             })
             .detach();
 
@@ -1092,11 +1080,7 @@ impl WindowsWindowInner {
                 click_count,
                 first_mouse: false,
             });
-            // anything slow here delays the move loop's start.
-            let trace = crate::mdv_trace::start();
-            crate::mdv_trace::mark("press_before_dispatch", handle, wparam.0 as i64);
             let handled = !func(input).propagate;
-            crate::mdv_trace::span("press_after_dispatch", handle, handled as i64, trace);
             self.state.callbacks.input.set(Some(func));
 
             if handled {
@@ -1369,7 +1353,6 @@ impl WindowsWindowInner {
 
     #[inline]
     fn draw_window(&self, handle: HWND, force_render: bool) -> Option<isize> {
-        let trace = crate::mdv_trace::start();
         let Some(_guard) = self.state.draw_coordinator.try_begin_draw() else {
             log::debug!("deferring re-entrant draw of window {handle:?}");
             if force_render {
@@ -1418,7 +1401,6 @@ impl WindowsWindowInner {
         self.state.callbacks.request_frame.set(Some(request_frame));
         self.update_ime_enabled(handle);
         unsafe { ValidateRect(Some(handle), None).ok().log_err() };
-        crate::mdv_trace::paint_done(handle, trace);
 
         Some(0)
     }

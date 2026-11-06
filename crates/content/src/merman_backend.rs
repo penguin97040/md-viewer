@@ -1,5 +1,4 @@
-//! Optional merman backend (feature `merman`). Spike code: same inputs and outputs as the
-//! mermaid-rs-renderer path in `mermaid.rs`.
+//! Draws Mermaid text with merman. `mermaid.rs` holds the checks around it.
 
 use std::sync::OnceLock;
 

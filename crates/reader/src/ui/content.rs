@@ -9,11 +9,13 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use gpui::RenderImage;
 use mdv_content::{boost_light_on_dark, rasterise, ContentTheme, DiagramOptions, MathOptions, RenderedAsset};
 
 use crate::layout::{AssetBox, Assets, ImageState};
+use crate::locked;
 use crate::model::ImageSource;
 use mdv_theme::Mode;
 
@@ -23,7 +25,14 @@ const KATEX_EM: f32 = 1.1;
 const RASTER_BUDGET: usize = 384 << 20;
 /// Pixels in one raster before its scale is reduced.
 const MAX_RASTER_PIXELS: f32 = 24_000_000.0;
+/// Worker threads for one document, which exist only while it has work.
 const WORKERS: usize = 3;
+/// How long an idle worker waits for more before it ends.
+const WORKER_IDLE: Duration = Duration::from_secs(10);
+/// A render refused because too many earlier ones are still running is tried again this often,
+/// and after this many tries shows its error.
+const BUSY_RETRY: Duration = Duration::from_secs(1);
+const BUSY_TRIES: u32 = 30;
 const MAX_QUEUED: usize = 96;
 /// Mermaid.js draws at 16 px whatever the body size is.
 const MERMAID_PX: f32 = 16.0;
@@ -52,6 +61,19 @@ struct Job {
     key: u64,
     kind: Kind,
     scale: f32,
+    tries: u32,
+    /// Not to be tried before this.
+    not_before: Option<Instant>,
+}
+
+impl Job {
+    fn new(key: u64, kind: Kind, scale: f32) -> Self {
+        Self { key, kind, scale, tries: 0, not_before: None }
+    }
+
+    fn ready(&self, now: Instant) -> bool {
+        self.not_before.is_none_or(|t| t <= now)
+    }
 }
 
 #[derive(Default)]
@@ -64,21 +86,55 @@ struct Map {
     sharp: HashMap<u64, (u64, u32)>,
     /// Per diagram, the key of the newest size-matched raster that finished.
     last_ready: HashMap<u64, u64>,
+    /// Pictures let go of, whose GPU copies the view is yet to release.
+    retired: Vec<Arc<RenderImage>>,
 }
 
-#[derive(Default)]
 struct Inner {
     map: Mutex<Map>,
     queue: Mutex<VecDeque<Job>>,
     wake: Condvar,
     finished: AtomicU64,
     outstanding: AtomicUsize,
-    started: AtomicBool,
+    workers: AtomicUsize,
+    /// Every handle has gone: the workers end, which frees this.
+    closed: AtomicBool,
+    /// Who this document's renders are counted against.
+    owner: u64,
 }
 
-#[derive(Clone, Default)]
+/// Dropped with the last `ContentStore` handle. The workers hold `Inner` themselves, so without
+/// this a closed document would keep its threads and its pictures for good.
+struct Handle(Arc<Inner>);
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        self.0.closed.store(true, Ordering::SeqCst);
+        let _held = locked(&self.0.queue);
+        self.0.wake.notify_all();
+    }
+}
+
+#[derive(Clone)]
 pub struct ContentStore {
     inner: Arc<Inner>,
+    _handle: Arc<Handle>,
+}
+
+impl Default for ContentStore {
+    fn default() -> Self {
+        let inner = Arc::new(Inner {
+            map: Mutex::default(),
+            queue: Mutex::default(),
+            wake: Condvar::new(),
+            finished: AtomicU64::new(0),
+            outstanding: AtomicUsize::new(0),
+            workers: AtomicUsize::new(0),
+            closed: AtomicBool::new(false),
+            owner: mdv_content::new_render_owner(),
+        });
+        Self { _handle: Arc::new(Handle(inner.clone())), inner }
+    }
 }
 
 fn hash_of<T: Hash>(v: T) -> u64 {
@@ -109,17 +165,34 @@ impl ContentStore {
         self.inner.outstanding.load(Ordering::Acquire)
     }
 
+    /// Pictures this store has let go of since the last call.
+    pub fn take_retired(&self) -> Vec<Arc<RenderImage>> {
+        std::mem::take(&mut locked(&self.inner.map).retired)
+    }
+
+    /// Every picture held, for a document that is closing.
+    pub fn take_images(&self) -> Vec<Arc<RenderImage>> {
+        let mut m = locked(&self.inner.map);
+        let mut out = std::mem::take(&mut m.retired);
+        out.extend(m.entries.drain().filter_map(|(_, e)| match e {
+            Entry::Ready { image, .. } => Some(image),
+            _ => None,
+        }));
+        m.bytes = 0;
+        out
+    }
+
     /// Keys finished since the last call.
     pub fn take_done(&self) -> Vec<u64> {
-        std::mem::take(&mut self.inner.map.lock().expect("lock").done)
+        std::mem::take(&mut locked(&self.inner.map).done)
     }
 
     pub fn is_pending(&self, key: u64) -> bool {
-        matches!(self.inner.map.lock().expect("lock").entries.get(&key), Some(Entry::Pending))
+        matches!(locked(&self.inner.map).entries.get(&key), Some(Entry::Pending))
     }
 
     pub fn by_key(&self, key: u64) -> Option<Arc<RenderImage>> {
-        let mut m = self.inner.map.lock().expect("lock");
+        let mut m = locked(&self.inner.map);
         m.tick += 1;
         let t = m.tick;
         match m.entries.get_mut(&key) {
@@ -134,8 +207,8 @@ impl ContentStore {
     /// Drops queued work nobody can see any more (a new document, a tab switch). Work already
     /// running finishes into the cache, which is keyed by source and options and so stays valid.
     pub fn cancel_queued(&self) {
-        let dropped: Vec<Job> = self.inner.queue.lock().expect("lock").drain(..).collect();
-        let mut m = self.inner.map.lock().expect("lock");
+        let dropped: Vec<Job> = locked(&self.inner.queue).drain(..).collect();
+        let mut m = locked(&self.inner.map);
         for j in dropped {
             if matches!(m.entries.get(&j.key), Some(Entry::Pending)) {
                 m.entries.remove(&j.key);
@@ -145,7 +218,7 @@ impl ContentStore {
     }
 
     fn lookup(&self, key: u64, make: impl FnOnce() -> Kind, scale: f32) -> Lookup {
-        let mut m = self.inner.map.lock().expect("lock");
+        let mut m = locked(&self.inner.map);
         m.tick += 1;
         let t = m.tick;
         match m.entries.get_mut(&key) {
@@ -159,8 +232,8 @@ impl ContentStore {
                 m.entries.insert(key, Entry::Pending);
                 drop(m);
                 self.inner.outstanding.fetch_add(1, Ordering::AcqRel);
-                let mut q = self.inner.queue.lock().expect("lock");
-                q.push_back(Job { key, kind: make(), scale });
+                let mut q = locked(&self.inner.queue);
+                q.push_back(Job::new(key, make(), scale));
                 // Newest first, and only so many: what scrolled past is asked for again if it returns.
                 let mut dropped = Vec::new();
                 while q.len() > MAX_QUEUED {
@@ -168,7 +241,7 @@ impl ContentStore {
                 }
                 drop(q);
                 if !dropped.is_empty() {
-                    let mut m = self.inner.map.lock().expect("lock");
+                    let mut m = locked(&self.inner.map);
                     for k in &dropped {
                         if matches!(m.entries.get(k), Some(Entry::Pending)) {
                             m.entries.remove(k);
@@ -192,7 +265,7 @@ impl ContentStore {
     /// true when a new render was queued, so the caller can ask for another frame.
     pub fn for_display(&self, key: u64, w: f32, scale: f32) -> (Option<Arc<RenderImage>>, bool) {
         let width = (w * scale).ceil() as u32;
-        let mut m = self.inner.map.lock().expect("lock");
+        let mut m = locked(&self.inner.map);
         m.tick += 1;
         let t = m.tick;
         let redraw = match m.entries.get_mut(&key) {
@@ -216,7 +289,7 @@ impl ContentStore {
         if !matches!(m.entries.get(&vkey), Some(Entry::Pending)) {
             // One request per diagram is wanted at a time: a newer size replaces a queued older one.
             if let Some((old, _)) = m.sharp.insert(key, (vkey, width)) {
-                let mut q = self.inner.queue.lock().expect("lock");
+                let mut q = locked(&self.inner.queue);
                 if let Some(i) = q.iter().position(|j| j.key == old) {
                     q.remove(i);
                     self.inner.outstanding.fetch_sub(1, Ordering::AcqRel);
@@ -227,7 +300,7 @@ impl ContentStore {
             }
             m.entries.insert(vkey, Entry::Pending);
             self.inner.outstanding.fetch_add(1, Ordering::AcqRel);
-            self.inner.queue.lock().expect("lock").push_back(Job { key: vkey, kind: Kind::Sharp { base: key, redraw, width }, scale });
+            locked(&self.inner.queue).push_back(Job::new(vkey, Kind::Sharp { base: key, redraw, width }, scale));
             queued = true;
         }
         // The newest finished size-matched raster of this diagram, if any, else the base one.
@@ -244,12 +317,14 @@ impl ContentStore {
     }
 
     fn start_workers(&self) {
-        if self.inner.started.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        for n in 0..WORKERS {
+        while self.inner.workers.try_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < WORKERS).then_some(n + 1)).is_ok() {
             let inner = self.inner.clone();
-            let _ = std::thread::Builder::new().name(format!("mdv-content-{n}")).spawn(move || worker(inner));
+            // The same stack as the renders: drawing a diagram walks as deep as the diagram goes.
+            let spawned = std::thread::Builder::new().name("mdv-content".into()).stack_size(mdv_content::limits::WORKER_STACK).spawn(move || worker(inner));
+            if spawned.is_err() {
+                self.inner.workers.fetch_sub(1, Ordering::AcqRel);
+                break;
+            }
         }
     }
 
@@ -276,21 +351,54 @@ pub enum Lookup {
     Failed(String),
 }
 
+/// The next job to run: newest first, and formulas before everything else, since formulas are quick
+/// and diagrams slow, and a diagram should never hold up the text around it.
+fn next_job(q: &VecDeque<Job>, now: Instant) -> Option<usize> {
+    q.iter().rposition(|j| j.ready(now) && matches!(j.kind, Kind::Math { .. })).or_else(|| q.iter().rposition(|j| j.ready(now)))
+}
+
 fn worker(inner: Arc<Inner>) {
+    mdv_content::set_render_owner(inner.owner);
     loop {
-        let job = {
-            let mut q = inner.queue.lock().expect("lock");
+        let mut job = {
+            let mut q = locked(&inner.queue);
+            let mut idle_since = Instant::now();
             loop {
-                // Formulas are quick and diagrams slow: take a formula first so a diagram never
-                // holds up the text around it.
-                if let Some(i) = q.iter().rposition(|j| matches!(j.kind, Kind::Math { .. })).or(q.len().checked_sub(1)) {
-                    break q.remove(i).expect("job");
+                let now = Instant::now();
+                if inner.closed.load(Ordering::SeqCst) {
+                    inner.workers.fetch_sub(1, Ordering::AcqRel);
+                    return;
                 }
-                q = inner.wake.wait(q).expect("wait");
+                if let Some(job) = next_job(&q, now).and_then(|i| q.remove(i)) {
+                    break job;
+                }
+                // Nothing to run. Waiting on retries counts as busy; with an empty queue, end after
+                // a while. The count drops under the queue lock, so a request made just after this
+                // sees it and starts a new worker.
+                let wake_at = q.iter().filter_map(|j| j.not_before).min();
+                if !q.is_empty() {
+                    idle_since = now;
+                } else if now.duration_since(idle_since) >= WORKER_IDLE {
+                    inner.workers.fetch_sub(1, Ordering::AcqRel);
+                    return;
+                }
+                let wait = wake_at.map_or(WORKER_IDLE, |t| t.saturating_duration_since(now));
+                q = inner.wake.wait_timeout(q, wait).unwrap_or_else(|e| e.into_inner()).0;
             }
         };
-        let result = std::panic::catch_unwind(|| run(&job)).unwrap_or_else(|_| Err("the renderer stopped unexpectedly".to_string()));
-        let mut m = inner.map.lock().expect("lock");
+        let result = std::panic::catch_unwind(|| run(&job)).unwrap_or_else(|_| Err(Fail::Other("the renderer stopped unexpectedly".to_string())));
+        if matches!(result, Err(Fail::Busy)) && job.tries < BUSY_TRIES {
+            job.tries += 1;
+            job.not_before = Some(Instant::now() + BUSY_RETRY);
+            locked(&inner.queue).push_front(job);
+            inner.wake.notify_one();
+            continue;
+        }
+        let result = result.map_err(|e| match e {
+            Fail::Busy => mdv_content::ContentError::Busy.to_string(),
+            Fail::Other(m) => m,
+        });
+        let mut m = locked(&inner.map);
         // Only a job still wanted (not cancelled) has a Pending entry to complete.
         let entry = match result {
             Ok((w, h, baseline, image, bytes, redraw)) => {
@@ -299,8 +407,9 @@ fn worker(inner: Arc<Inner>) {
                 if let Kind::Sharp { base, .. } = &job.kind {
                     // The older size-matched raster has been replaced; its memory goes.
                     if let Some(old) = m.last_ready.insert(*base, job.key).filter(|o| *o != job.key) {
-                        if let Some(Entry::Ready { bytes, .. }) = m.entries.remove(&old) {
+                        if let Some(Entry::Ready { bytes, image, .. }) = m.entries.remove(&old) {
                             m.bytes -= bytes;
+                            m.retired.push(image);
                         }
                     }
                 }
@@ -325,21 +434,36 @@ fn evict(m: &mut Map) {
         }) else {
             break;
         };
-        if let Some(Entry::Ready { bytes, .. }) = m.entries.remove(&k) {
+        if let Some(Entry::Ready { bytes, image, .. }) = m.entries.remove(&k) {
             m.bytes -= bytes;
+            m.retired.push(image);
         }
     }
 }
 
 type Done = (f32, f32, f32, Arc<RenderImage>, usize, Option<Redraw>);
 
-fn run(job: &Job) -> Result<Done, String> {
+enum Fail {
+    Busy,
+    Other(String),
+}
+
+impl From<mdv_content::ContentError> for Fail {
+    fn from(e: mdv_content::ContentError) -> Self {
+        match e {
+            mdv_content::ContentError::Busy => Fail::Busy,
+            e => Fail::Other(e.to_string()),
+        }
+    }
+}
+
+fn run(job: &Job) -> Result<Done, Fail> {
     let (asset, mut img, dark, redraw) = match &job.kind {
         Kind::Sharp { redraw, width, .. } => {
             let a = &redraw.asset;
             // `rasterise` rounds the width up, so aim a hair under the whole number.
             let scale = (*width as f32 - 0.001) / a.width_px;
-            let img = rasterise(a, scale).map_err(|e| e.to_string())?;
+            let img = rasterise(a, scale)?;
             (a.clone(), img, redraw.dark, None)
         }
         kind => {
@@ -347,14 +471,13 @@ fn run(job: &Job) -> Result<Done, String> {
                 Kind::Math { src, display, opts } => mdv_content::render_math(src, *display, opts),
                 Kind::Mermaid { src, opts } => mdv_content::render_mermaid(src, opts),
                 Kind::Sharp { .. } => unreachable!(),
-            }
-            .map_err(|e| e.to_string())?;
+            }?;
             let mut scale = job.scale.clamp(0.5, 8.0);
             let px = asset.width_px * asset.height_px * scale * scale;
             if px > MAX_RASTER_PIXELS {
                 scale *= (MAX_RASTER_PIXELS / px).sqrt();
             }
-            let img = rasterise(&asset, scale).map_err(|e| e.to_string())?;
+            let img = rasterise(&asset, scale)?;
             let dark = match kind {
                 Kind::Math { opts, .. } => opts.theme == ContentTheme::Dark,
                 Kind::Mermaid { opts, .. } => opts.theme == ContentTheme::Dark,
@@ -377,7 +500,7 @@ fn run(job: &Job) -> Result<Done, String> {
         p.swap(0, 2);
     }
     let bytes = px.len();
-    let buf = image::RgbaImage::from_raw(img.width, img.height, px).ok_or_else(|| "bad raster size".to_string())?;
+    let buf = image::RgbaImage::from_raw(img.width, img.height, px).ok_or_else(|| Fail::Other("bad raster size".to_string()))?;
     let image = Arc::new(RenderImage::new(vec![image::Frame::new(buf)]));
     Ok((asset.width_px, asset.height_px, asset.baseline_px, image, bytes, redraw))
 }
@@ -439,4 +562,49 @@ fn math_key(src: &str, display: bool, font_size: f32, mode: Mode, scale: f32) ->
 
 fn mermaid_key(src: &str, font_size: f32, mode: Mode, scale: f32) -> u64 {
     hash_of(("d", src, theme_of(mode) as u8, font_size.to_bits(), scale_bits(scale)))
+}
+
+#[cfg(test)]
+mod worker_tests {
+    use super::*;
+
+    #[test]
+    fn a_closed_document_frees_its_threads_and_pictures() {
+        let store = ContentStore::new();
+        let inner = Arc::downgrade(&store.inner);
+        assert!(matches!(store.math("x^2", false, 16.0, Mode::Dark, 1.0), Lookup::Pending(_)));
+        let copy = store.clone();
+        drop(store);
+        assert!(inner.upgrade().is_some(), "a clone still holds it");
+        let t = Instant::now();
+        while copy.outstanding() > 0 {
+            assert!(t.elapsed() < Duration::from_secs(20));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(copy);
+        while inner.upgrade().is_some() {
+            assert!(t.elapsed() < Duration::from_secs(20), "the workers kept the store alive");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn jobs_waiting_to_retry_do_not_hold_up_others() {
+        let now = Instant::now();
+        let math = || Kind::Math { src: String::new(), display: false, opts: MathOptions::default() };
+        let diagram = || Kind::Mermaid { src: String::new(), opts: DiagramOptions::default() };
+        let later = |mut j: Job| {
+            j.not_before = Some(now + Duration::from_secs(1));
+            j
+        };
+        let q: VecDeque<Job> = [Job::new(1, diagram(), 1.0), Job::new(2, diagram(), 1.0), later(Job::new(3, diagram(), 1.0))].into();
+        assert_eq!(next_job(&q, now), Some(1), "newest that is ready");
+        let q: VecDeque<Job> = [Job::new(1, math(), 1.0), Job::new(2, diagram(), 1.0)].into();
+        assert_eq!(next_job(&q, now), Some(0), "formulas go first");
+        let q: VecDeque<Job> = [later(Job::new(1, math(), 1.0)), Job::new(2, diagram(), 1.0)].into();
+        assert_eq!(next_job(&q, now), Some(1), "unless they're waiting");
+        let q: VecDeque<Job> = [later(Job::new(1, diagram(), 1.0))].into();
+        assert_eq!(next_job(&q, now), None);
+        assert_eq!(next_job(&q, now + Duration::from_secs(1)), Some(0));
+    }
 }

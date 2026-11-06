@@ -2,7 +2,7 @@
 //! tab to a PDF off the UI thread behind the progress toast with Cancel. On success the toast
 //! offers Open, which hands the file to the system's PDF viewer (see `mdv_print::handoff`).
 //!
-//! `MDV_PRINT_SAVE_TO=<path>` stands in for the dialog in tests; `MDV_PRINT_SAVE_TO=-` stands in
+//! With `dev-harness`, a path can stand in for the dialog in tests, and `-` stands in
 //! for cancelling it.
 
 use std::path::{Path, PathBuf};
@@ -59,7 +59,7 @@ impl AppView {
         let doc_id = doc.id;
         self.print = Some(Running { job: None, reader });
         // Ask first: nothing is built until there is somewhere to put it.
-        let asked: Result<Option<PathBuf>, String> = match std::env::var_os("MDV_PRINT_SAVE_TO") {
+        let asked: Result<Option<PathBuf>, String> = match crate::harness::print_save_to() {
             Some(v) if v == "-" => Ok(None),
             Some(v) => Ok(Some(PathBuf::from(v))),
             None => {
@@ -109,6 +109,7 @@ impl AppView {
         }
         // The tab or file may have changed while the dialog was open.
         let same_tab = self.reader().is_some_and(|r| r == run.reader);
+        let web_images = run.reader.read(cx).web_images_allowed();
         let doc = run.reader.read(cx).doc.clone().filter(|d| d.id == doc_id);
         let (true, Some(doc)) = (same_tab, doc) else {
             self.print = None;
@@ -117,7 +118,7 @@ impl AppView {
         };
         let s = self.reader_settings();
         let title = self.tabs.get(self.active).map(|t| t.name.to_string());
-        let job = PrintJob::start(doc, PrintOptions { serif: s.serif, line_height: s.line_height, title, ..Default::default() }, dest);
+        let job = PrintJob::start(doc, PrintOptions { serif: s.serif, line_height: s.line_height, title, web_images, ..Default::default() }, dest);
         if let Some(r) = self.print.as_mut() {
             r.job = Some(job);
         }

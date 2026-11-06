@@ -15,6 +15,8 @@ use mdv_reader::paths;
 
 const MAX_IMAGE_BYTES: u64 = 25 << 20;
 const MAX_IMAGE_SIDE: u32 = 16_384;
+/// Decoded size of one image, as on screen. A small PNG can claim 16,384 x 16,384 pixels, which is 1 GB.
+const MAX_DECODED_BYTES: u64 = 400 << 20;
 /// Rendered SVG text kept before older entries are dropped and redrawn on demand.
 const SVG_BUDGET: usize = 192 << 20;
 /// Body text colour in print, `--text` in the print block of style.css.
@@ -101,6 +103,7 @@ fn diagram_opts() -> DiagramOptions {
 pub struct PrintAssets<'a> {
     pub store: &'a RefCell<Store>,
     pub document: Option<&'a Path>,
+    pub web_images: bool,
 }
 
 impl PrintAssets<'_> {
@@ -160,8 +163,11 @@ impl Assets for PrintAssets<'_> {
 
     fn image(&self, source: &ImageSource) -> ImageState {
         let id = match source {
+            // Printing fetches nothing. A web image the reader agreed to load and that has arrived
+            // is printed; any other is held, as it is on screen.
+            ImageSource::Web(u) if self.web_images && mdv_webimage::cached(u).is_some() => format!("W{u}"),
             ImageSource::Web(_) => {
-                // Held, never fetched. Counted once per distinct address by the caller's totals.
+                // Counted once per distinct address by the caller's totals.
                 self.store.borrow_mut().held_web_images += 1;
                 return ImageState::Failed;
             }
@@ -192,9 +198,14 @@ impl Assets for PrintAssets<'_> {
 }
 
 fn load_image(id: &str, doc: Option<&Path>) -> Option<(Vec<u8>, RasterKind, f32, f32)> {
-    let bytes = if let Some(href) = id.strip_prefix('L') {
+    let bytes = if let Some(url) = id.strip_prefix('W') {
+        mdv_webimage::cached(url)?.data.clone()
+    } else if let Some(href) = id.strip_prefix('L') {
         // The same check as on screen comes before anything touches the file system.
         let path = paths::resolve(doc?, href).ok()?;
+        if !paths::is_image_path(&path) {
+            return None;
+        }
         let meta = std::fs::metadata(&path).ok()?;
         if !meta.is_file() || meta.len() > MAX_IMAGE_BYTES {
             return None;
@@ -203,10 +214,26 @@ fn load_image(id: &str, doc: Option<&Path>) -> Option<(Vec<u8>, RasterKind, f32,
     } else {
         base64(id.strip_prefix('D')?.split_once(',')?.1)?
     };
+    let as_png = |img: image::DynamicImage| {
+        let mut out = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).ok()?;
+        Some(out)
+    };
+    if bytes.first() == Some(&b'<') || bytes.starts_with(b"\xef\xbb\xbf") {
+        // SVG: drawn to pixels the same way as on screen, so that the same limits apply.
+        let svg = mdv_content::render_svg_image(&bytes).ok()?;
+        let buf = image::RgbaImage::from_raw(svg.image.width, svg.image.height, svg.image.pixels)?;
+        return Some((as_png(buf.into())?, RasterKind::Png, svg.width_px, svg.height_px));
+    }
     let reader = image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format().ok()?;
     let format = reader.format()?;
+    // The formats a document can reach on screen, and the same limit on what one can claim to be.
+    use image::ImageFormat as F;
+    if !matches!(format, F::Png | F::Jpeg | F::Gif | F::WebP | F::Bmp | F::Ico) {
+        return None;
+    }
     let (w, h) = reader.into_dimensions().ok()?;
-    if w == 0 || h == 0 || w > MAX_IMAGE_SIDE || h > MAX_IMAGE_SIDE {
+    if w == 0 || h == 0 || w > MAX_IMAGE_SIDE || h > MAX_IMAGE_SIDE || w as u64 * h as u64 * 4 > MAX_DECODED_BYTES {
         return None;
     }
     let kind = match format {
@@ -219,11 +246,8 @@ fn load_image(id: &str, doc: Option<&Path>) -> Option<(Vec<u8>, RasterKind, f32,
     match kind {
         Some(k) => Some((bytes, k, w as f32, h as f32)),
         None => {
-            // Anything else (BMP) is decoded once and kept as PNG.
-            let img = image::load_from_memory(&bytes).ok()?;
-            let mut out = Vec::new();
-            img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).ok()?;
-            Some((out, RasterKind::Png, w as f32, h as f32))
+            // Anything else (BMP, ICO) is decoded once and kept as PNG.
+            Some((as_png(image::load_from_memory(&bytes).ok()?)?, RasterKind::Png, w as f32, h as f32))
         }
     }
 }

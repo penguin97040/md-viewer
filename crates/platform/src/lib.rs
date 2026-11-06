@@ -45,3 +45,18 @@ impl DesktopRect {
         (r > x && b > y).then_some(DesktopRect { x, y, width: r - x, height: b - y })
     }
 }
+
+/// Tells the reader the app has hit a fatal error and has to close. Called from a panic hook, so it
+/// allocates little and blocks until dismissed. Elsewhere than Windows the report on standard error
+/// is what there is: a GUI toolkit can't safely be used here.
+pub fn show_fatal_error(text: &str) {
+    #[cfg(windows)]
+    unsafe {
+        use windows::core::{w, PCWSTR};
+        use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK, MB_TASKMODAL};
+        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        MessageBoxW(None, PCWSTR(wide.as_ptr()), w!("MD Viewer"), MB_OK | MB_ICONERROR | MB_TASKMODAL);
+    }
+    #[cfg(not(windows))]
+    eprintln!("{text}");
+}

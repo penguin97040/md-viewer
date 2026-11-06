@@ -1,0 +1,13 @@
+[package]
+name = "mdv-webimage"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+ureq.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
+rustls.workspace = true

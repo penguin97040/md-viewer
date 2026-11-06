@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/theme", "crates/app", "crates/reader", "crates/content", "crates/platform", "crates/print"]
+members = ["crates/theme", "crates/app", "crates/reader", "crates/content", "crates/platform", "crates/print", "crates/webimage"]
 
 [workspace.package]
 edition = "2021"
@@ -41,7 +41,6 @@ ratex-types = "=0.1.15"
 ratex-parser = "=0.1.15"
 ratex-layout = "=0.1.15"
 ratex-svg = { version = "=0.1.15", features = ["embed-fonts"] }
-mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
 merman = { version = "=0.10.0-alpha.1", default-features = false, features = ["svg", "all-diagrams", "layout-cytoscape", "native-fonts"] }
 merman-export = { version = "=0.10.0-alpha.1", default-features = false, features = ["native-fonts"] }
 resvg = { version = "=0.47.0", default-features = false, features = ["text"] }
@@ -51,6 +50,11 @@ krilla = { version = "=0.8.2", default-features = false, features = ["raster-ima
 krilla-svg = "=0.8.1"
 rustybuzz = "=0.20.1"
 png = "=0.17.16"
+ureq = { version = "=3.5.1", default-features = false, features = ["rustls"] }
+url = "=2.5.8"
+mdv-webimage = { path = "crates/webimage" }
+rcgen = { version = "=0.14.7", default-features = false, features = ["crypto", "ring", "pem"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std"] }
 
 # Measured on the spike: Windows 102 MB by default, 72 MB stripped, 40 MB with fat LTO, 30 MB with
 # opt-level "s", 26 MB with this profile, 25 MB with "z" everywhere (which nearly doubles find time).

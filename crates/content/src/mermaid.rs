@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use mermaid_rs_renderer::{render_with_options, RenderOptions, Theme};
-
 use crate::{guard, limits, svgcheck, ContentError, ContentTheme, DiagramOptions, RenderedAsset};
 
 pub(crate) fn render(src: &str, opts: &DiagramOptions) -> Result<RenderedAsset, ContentError> {
@@ -33,15 +31,8 @@ pub(crate) fn render(src: &str, opts: &DiagramOptions) -> Result<RenderedAsset, 
         opts.theme = ContentTheme::Light;
         card = true;
     }
-    let ro = options(&opts, card);
-    guard::run(&guard::MERMAID_ABANDONED, limits::MERMAID_BUDGET, move || {
-        #[cfg(feature = "merman")]
-        let svg = {
-            let _ = &ro;
-            crate::merman_backend::render_svg(&clean, &opts, card.then_some(mdv_theme::BRAND_TEXT))?
-        };
-        #[cfg(not(feature = "merman"))]
-        let svg = render_with_options(&clean, ro).map_err(|e| ContentError::Parse(e.to_string()))?;
+    guard::run(&guard::MERMAID, limits::MERMAID_BUDGET, move || {
+        let svg = crate::merman_backend::render_svg(&clean, &opts, card.then_some(mdv_theme::BRAND_TEXT))?;
         let svg = escape_bare_ampersands(svg);
         svgcheck::check(&svg)?;
         let (w, h) = size(&svg)?;
@@ -68,8 +59,8 @@ fn strip_directives(src: &str) -> String {
     out
 }
 
-/// mermaid-rs-renderer 0.3.1 leaves a literal `&` unescaped in some labels (found by fuzzing:
-/// quadrant axis titles), which makes the SVG ill-formed. Escaping a bare `&` only turns it into
+/// A literal `&` left unescaped in a label (found by fuzzing: quadrant axis titles) makes the SVG
+/// ill-formed. Escaping a bare `&` only turns it into
 /// literal text, so it is safe to repair here.
 fn escape_bare_ampersands(svg: String) -> String {
     if !svg.contains('&') {
@@ -128,90 +119,11 @@ fn kind(src: &str) -> String {
     String::new()
 }
 
-/// mermaid-rs-renderer writes some light-theme colours into the SVG as literals (quadrant text
+/// Some diagram types carry light-theme colours into the SVG as literals (quadrant text
 /// `#131300`, timeline pastel boxes under theme text, C4 labels). In dark mode these are drawn in
 /// the light scheme on a light card instead of unreadable text on black.
 fn hard_codes_light_colours(k: &str) -> bool {
-    k.starts_with("quadrantchart") || k.starts_with("timeline") || k.starts_with("c4") || (cfg!(feature = "merman") && k.starts_with("packet"))
-}
-
-fn options(opts: &DiagramOptions, card: bool) -> RenderOptions {
-    let mut o = RenderOptions::mermaid_default();
-    o.theme = theme(opts, card);
-    // Deterministic character-width estimates for ASCII text; no system fonts are read and no
-    // font cache is written to disk. (Non-ASCII labels still reach the renderer's system-font
-    // lookup; see the spike report.)
-    o.layout.fast_text_metrics = true;
-    o
-}
-
-fn hex(rgb: u32) -> String {
-    format!("#{:06x}", rgb & 0xff_ffff)
-}
-
-/// Colours copied from the CSS Mermaid.js 12.1.0 emits for its `dark` and `default` themes (read
-/// from the `<style>` block of SVGs rendered in headless Chrome with the app's configuration).
-fn theme(opts: &DiagramOptions, card: bool) -> Theme {
-    let mut t = Theme::mermaid_default();
-    t.font_family = "Geist".into();
-    t.font_size = opts.font_size;
-    t.background = if card { hex(mdv_theme::BRAND_TEXT) } else { "none".into() };
-    let s = |v: &str| v.to_string();
-    match opts.theme {
-        ContentTheme::Dark => {
-            t.primary_color = s("#1f2020");
-            t.primary_text_color = s("#cccccc");
-            t.text_color = s("#cccccc");
-            t.primary_border_color = s("#cccccc");
-            t.line_color = s("#d3d3d3");
-            t.secondary_color = s("#474949");
-            t.tertiary_color = s("#474949");
-            t.edge_label_background = s("#585858");
-            t.cluster_background = s("#474949");
-            t.cluster_border = s("#6b6b6b");
-            t.sequence_actor_fill = s("#1f2020");
-            t.sequence_actor_border = s("#cccccc");
-            t.sequence_actor_line = s("#cccccc");
-            t.sequence_note_fill = s("#474949");
-            t.sequence_note_border = s("#2f2f2f");
-            t.sequence_activation_fill = s("#474949");
-            t.sequence_activation_border = s("#cccccc");
-            t.pie_title_text_color = s("#cccccc");
-            t.pie_section_text_color = s("#cccccc");
-            t.pie_legend_text_color = s("#cccccc");
-            t.pie_stroke_color = s("#cccccc");
-            t.pie_outer_stroke_color = s("#cccccc");
-        }
-        ContentTheme::Light | ContentTheme::Print => {
-            t.primary_color = s("#ececff");
-            t.primary_text_color = s("#333333");
-            t.text_color = s("#333333");
-            t.primary_border_color = s("#9370db");
-            t.line_color = s("#333333");
-            t.secondary_color = s("#ffffde");
-            t.edge_label_background = s("#e8e8e8");
-            t.cluster_background = s("#ffffde");
-            t.cluster_border = s("#aaaa33");
-            t.sequence_actor_fill = s("#ececff");
-            t.sequence_actor_border = s("#9370db");
-            t.sequence_actor_line = s("#9370db");
-            t.sequence_note_fill = s("#fff5ad");
-            t.sequence_note_border = s("#aaaa33");
-            t.sequence_activation_fill = s("#f4f4f4");
-            t.sequence_activation_border = s("#666666");
-        }
-    }
-    if opts.theme == ContentTheme::Print {
-        for f in [&mut t.primary_text_color, &mut t.text_color, &mut t.pie_title_text_color, &mut t.pie_section_text_color, &mut t.pie_legend_text_color] {
-            *f = s("#000000");
-        }
-    }
-    if let Some(c) = opts.text_color {
-        for f in [&mut t.primary_text_color, &mut t.text_color, &mut t.pie_title_text_color, &mut t.pie_section_text_color, &mut t.pie_legend_text_color] {
-            *f = hex(c);
-        }
-    }
-    t
+    k.starts_with("quadrantchart") || k.starts_with("timeline") || k.starts_with("c4") || k.starts_with("packet")
 }
 
 fn size(svg: &str) -> Result<(f32, f32), ContentError> {

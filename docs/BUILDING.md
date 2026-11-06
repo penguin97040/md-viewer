@@ -190,14 +190,18 @@ fonttools and skia-pathops). Licence: [THIRD-PARTY.md](../THIRD-PARTY.md).
 `docs/screenshots/*.png` are 1280 x 800 and are made by `scripts/screenshots.sh`; see the header
 of that script for what it needs. Regenerate them after interface changes.
 
-## Environment variables for testing
+## Test switches (environment variables)
 
-`MDV_SIZE=1280x800` sets the window size. `MDV_NO_SINGLE_INSTANCE=1` stops a second launch handing
-its files to a running copy. `MDV_PLATFORM=mac` forces the macOS layout. `MDV_PERF=1` prints
-timings. `MDV_SCRIPT=<file>` and `MDV_RESULTS=<file>` run a scripted session (see
-`crates/reader/src/ui/script.rs`). `MDV_DEMO` takes a comma list: `light`, `find`, `settings`, `tools`
-(narrow overflow menu), `web`, `toast`. Settings are read from and saved to the real config folder,
-so set `XDG_CONFIG_HOME` to a scratch folder when testing on Linux.
+These exist only in a build with `--features dev-harness`. A default build reads no `MDV_` variable
+at all, so never ship one built with the feature: `MDV_SCRIPT` runs a script of commands, including
+shell commands. They're all in `crates/app/src/harness.rs`, `crates/app/src/demo.rs` and
+`crates/reader/src/ui/script.rs`.
+
+`MDV_DEMO` takes a comma list: `light`, `find`, `settings`, `tools` (narrow overflow menu), `web`,
+`toast`. Settings are read from and saved to the real config folder, so set `XDG_CONFIG_HOME` to a
+scratch folder when testing on Linux.
+`MDV_SIZE=800x600` sets the window size, `MDV_PLATFORM=mac` forces the macOS layout, and
+`MDV_PERF=1` prints first-render and TOC row-build timings.
 
 X11 note: GPUI only drops the window manager frame when a compositor is running and the window
 manager advertises `_GTK_FRAME_EXTENTS` (xfwm4 does; Openbox does not). Without both, the system

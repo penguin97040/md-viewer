@@ -15,7 +15,6 @@ mod keyboard;
 mod platform;
 #[cfg(not(feature = "precompiled-shaders"))]
 mod shader_disk;
-mod mdv_trace;
 mod system_notifications;
 mod system_settings;
 mod util;

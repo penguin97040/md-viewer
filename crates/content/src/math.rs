@@ -26,7 +26,7 @@ pub(crate) fn render(src: &str, display: bool, opts: &MathOptions) -> Result<Ren
     let src = crate::strip_xml_illegal(src);
     let fs = opts.font_size as f64;
     let rgb = opts.text_color.unwrap_or_else(|| opts.theme.text_color());
-    guard::run(&guard::MATH_ABANDONED, limits::MATH_BUDGET, move || {
+    guard::run(&guard::MATH, limits::MATH_BUDGET, move || {
         // Parser::new, not ratex_parser::parser::parse: the latter strips outer $ delimiters.
         let ast = Parser::new(&src).parse().map_err(|e| ContentError::Parse(e.message))?;
         let lopts = LayoutOptions {

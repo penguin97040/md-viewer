@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,7 @@ use gpui::{
 use mdv_theme::Mode;
 
 use super::content::{ContentAssets, ContentStore};
+use super::crash;
 use super::images::ImageStore;
 use super::shaper::GpuiShaper;
 use crate::doc::Document;
@@ -42,6 +44,8 @@ pub enum ReaderEvent {
     /// A local markdown link was followed.
     OpenLocal { path: PathBuf, fragment: Option<String> },
     Toast(String),
+    /// Whether the bar offering to load web images should show has changed.
+    WebBar,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -147,6 +151,18 @@ pub struct ReaderView {
     pub visible: Vec<Visible>,
     bounds: Bounds<Pixels>,
     images: Arc<ImageStore>,
+    /// The reader agreed to load this tab's web images. It stays with the tab: through a reload,
+    /// and into another window, since the view itself moves with the tab.
+    web_consent: Arc<AtomicBool>,
+    /// The reader closed the bar that asks.
+    web_dismissed: bool,
+    /// What `WebBar` last told the window.
+    web_bar_shown: bool,
+    /// A bug stopped this document being drawn. Opening it again clears this.
+    failed: bool,
+    /// Pictures no longer used, whose copies in the windows' GPU atlases are yet to be released.
+    /// Nothing else frees those, and each one can be hundreds of megabytes.
+    retired: Vec<Arc<gpui::RenderImage>>,
     images_seen: u64,
     content: ContentStore,
     content_scale: f32,
@@ -215,7 +231,15 @@ const SCROLLBAR: f32 = 12.0;
 const WHEEL_LINE: f32 = 33.3;
 
 impl ReaderView {
-    pub fn new(settings: Settings, _cx: &mut Context<Self>) -> Self {
+    pub fn new(settings: Settings, cx: &mut Context<Self>) -> Self {
+        cx.on_release(|v: &mut Self, cx| {
+            let held = v.images.take_images().into_iter().chain(v.content.take_images()).chain(v.retired.drain(..));
+            for image in held.collect::<Vec<_>>() {
+                cx.drop_image(image, None);
+            }
+        })
+        .detach();
+        let web_consent = Arc::new(AtomicBool::new(false));
         Self {
             doc: None,
             settings,
@@ -245,7 +269,12 @@ impl ReaderView {
             find: FindState::default(),
             visible: Vec::new(),
             bounds: Bounds::default(),
-            images: Arc::new(ImageStore::new(None)),
+            images: Arc::new(ImageStore::new(None, web_consent.clone())),
+            web_consent,
+            web_dismissed: false,
+            web_bar_shown: false,
+            failed: false,
+            retired: Vec::new(),
             images_seen: 0,
             content: ContentStore::new(),
             content_scale: 1.0,
@@ -255,7 +284,7 @@ impl ReaderView {
             prefetching: None,
             prefetch_queue_gen: 0,
             last_heading: None,
-            perf: Perf { enabled: std::env::var("MDV_PERF").is_ok(), ..Default::default() },
+            perf: Perf { enabled: crash::perf_requested(), ..Default::default() },
             assets: None,
         }
     }
@@ -322,7 +351,9 @@ impl ReaderView {
     }
 
     pub fn show(&mut self, doc: Arc<Document>) {
-        self.images = Arc::new(ImageStore::new(doc.path.clone()));
+        self.failed = false;
+        self.retired.extend(self.images.take_images());
+        self.images = Arc::new(ImageStore::new(doc.path.clone(), self.web_consent.clone()));
         self.images_seen = 0;
         self.layouts.clear();
         self.waiting.clear();
@@ -345,6 +376,66 @@ impl ReaderView {
 
     /// Installs the asset provider. Everything laid out with placeholders is redone, keeping the
     /// text at the top of the view where it is. This is the path an async render arrival takes.
+    /// Runs document work on the UI thread. If a document finds a bug, only that document fails:
+    /// see `crash`. This has to be inside `Entity::update`, which a panic must not unwind through.
+    fn contained<T>(&mut self, fallback: T, cx: &mut Context<Self>, f: impl FnOnce(&mut Self, &mut Context<Self>) -> T) -> T {
+        if self.failed {
+            return fallback;
+        }
+        match crash::contain(|| f(self, cx)) {
+            Some(v) => v,
+            None => {
+                self.fail(cx);
+                fallback
+            }
+        }
+    }
+
+    /// Lets go of the document: whatever was being done to it can't be trusted to be consistent.
+    fn fail(&mut self, cx: &mut Context<Self>) {
+        self.failed = true;
+        self.doc = None;
+        self.retired.extend(self.images.take_images());
+        self.layouts.clear();
+        self.visible.clear();
+        self.waiting.clear();
+        self.states.clear();
+        self.selection = None;
+        self.drag = None;
+        self.thumb_drag = None;
+        self.area_thumb_drag = None;
+        self.find = FindState { gen: self.find.gen + 1, ..Default::default() };
+        self.prefetching = None;
+        self.prefetch_queue_gen += 1;
+        self.content.cancel_queued();
+        cx.notify();
+    }
+
+    pub fn web_bar_wanted(&self) -> bool {
+        self.images.holding_web_images() && !self.web_dismissed && !self.failed
+    }
+
+    /// Whether the reader has agreed to load this tab's web images.
+    pub fn web_images_allowed(&self) -> bool {
+        self.web_consent.load(Ordering::SeqCst)
+    }
+
+    /// The reader agreed. Every chunk is laid out again, which asks for the images it shows.
+    pub fn load_web_images(&mut self, cx: &mut Context<Self>) {
+        self.web_consent.store(true, Ordering::SeqCst);
+        self.capture_text_anchor();
+        self.layouts.clear();
+        self.prefetch_queue_gen += 1;
+        self.web_bar_shown = false;
+        cx.notify();
+    }
+
+    pub fn dismiss_web_bar(&mut self, cx: &mut Context<Self>) {
+        self.web_dismissed = true;
+        self.web_bar_shown = false;
+        cx.notify();
+    }
+
     pub fn set_assets(&mut self, assets: Option<Arc<dyn Assets + Send + Sync>>) {
         self.capture_text_anchor();
         self.assets = assets;
@@ -497,6 +588,11 @@ impl ReaderView {
     /// Repaints when maths, diagrams or images finish. Called after layout, which is what asks for
     /// them: nothing else wakes an idle window, so otherwise they wait for the next mouse move.
     fn watch_assets(&mut self, cx: &mut Context<Self>) {
+        let bar = self.web_bar_wanted();
+        if bar != self.web_bar_shown {
+            self.web_bar_shown = bar;
+            cx.emit(ReaderEvent::WebBar);
+        }
         if self.watching || (self.content.outstanding() == 0 && self.images.pending() == 0) {
             return;
         }
@@ -525,7 +621,17 @@ impl ReaderView {
         .detach();
     }
 
+    /// Frees the GPU copies of pictures nothing draws any more. This runs before the frame paints,
+    /// and whatever replaces them is in the scene that gets presented.
+    fn release_retired(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.retired.extend(self.content.take_retired());
+        for image in self.retired.drain(..) {
+            cx.drop_image(image, Some(&mut *window));
+        }
+    }
+
     fn prepare_frame(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        self.release_retired(window, cx);
         self.bounds = bounds;
         self.visible.clear();
         let Some(doc) = self.doc.clone() else { return };
@@ -792,8 +898,12 @@ impl ReaderView {
         cx.spawn(async move |this, cx| {
             let (l, took, waits) = task.await;
             let _ = this.update(cx, |this, cx| {
+                this.contained((), cx, |this, cx| {
                 this.prefetching = None;
                 // The result must belong to exactly this parse and these settings.
+                for id in this.images.take_started() {
+                    this.images.load(id);
+                }
                 let current = this.doc.as_ref().is_some_and(|d| d.id == doc_id) && this.prefetch_queue_gen == gen && this.cur == Some(opts);
                 // A formula that finished while this was being laid out leaves it stale.
                 let fresh = waits.iter().all(|w| this.content.is_pending(*w));
@@ -810,6 +920,7 @@ impl ReaderView {
                     this.layouts.insert(k, l);
                 }
                 cx.notify();
+                })
             });
         })
         .detach();
@@ -819,6 +930,10 @@ impl ReaderView {
 
     /// Scrolls to a heading by its index in the outline: 12 px above it, as `goTo` does.
     pub fn jump_to_heading(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.contained((), cx, |v, cx| v.go_to_heading(index, cx))
+    }
+
+    fn go_to_heading(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(doc) = self.doc.clone() else { return };
         let Some(h) = doc.headings.get(index) else { return };
         let i = h.chunk as usize;
@@ -830,6 +945,10 @@ impl ReaderView {
     }
 
     pub fn jump_to_fragment(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.contained((), cx, |v, cx| v.go_to_fragment(id, cx))
+    }
+
+    fn go_to_fragment(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(doc) = self.doc.clone() else { return };
         if let Some((i, offset)) = doc.locate_id(id, self.anchor.0) {
             self.pending_jump = Some((i, offset, -12.0));
@@ -1223,6 +1342,10 @@ impl ReaderView {
 
     /// Keys for the document itself. Returns whether the key was used.
     pub fn key_down(&mut self, e: &KeyDownEvent, mac: bool, cx: &mut Context<Self>) -> bool {
+        self.contained(false, cx, |v, cx| v.handle_key(e, mac, cx))
+    }
+
+    fn handle_key(&mut self, e: &KeyDownEvent, mac: bool, cx: &mut Context<Self>) -> bool {
         let m = &e.keystroke.modifiers;
         let command = if mac { m.platform } else { m.control };
         let view = f32::from(self.bounds.size.height);
@@ -1249,6 +1372,10 @@ impl ReaderView {
 
     /// Searches after the 160 ms the web reader waits while typing.
     pub fn find_query(&mut self, q: &str, delay: bool, cx: &mut Context<Self>) {
+        self.contained((), cx, |v, cx| v.start_find(q, delay, cx))
+    }
+
+    fn start_find(&mut self, q: &str, delay: bool, cx: &mut Context<Self>) {
         let folded = fold::fold(q);
         self.find.gen += 1;
         let gen = self.find.gen;
@@ -1333,6 +1460,10 @@ impl ReaderView {
 
     /// Next or previous, wrapping around.
     pub fn find_step(&mut self, dir: i64, cx: &mut Context<Self>) {
+        self.contained((), cx, |v, cx| v.step_find(dir, cx))
+    }
+
+    fn step_find(&mut self, dir: i64, cx: &mut Context<Self>) {
         let total = self.find.total as i64;
         if total == 0 {
             return;
@@ -1486,9 +1617,16 @@ fn same_target(a: &HitKind, b: &HitKind) -> bool {
     }
 }
 
+/// Shown in place of a document that found a bug.
+const FAILED_MESSAGE: &str = "This file could not be shown. Other tabs are not affected.";
+
 impl Render for ReaderView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div().flex_1().min_w_0().h_full().child(ReaderElement { a11y_lines: Vec::new(), view: cx.entity() })
+        if self.failed {
+            let p = *self.effective().mode.palette();
+            return div().flex_1().min_w_0().h_full().flex().items_center().justify_center().text_color(rgb(p.muted)).child(FAILED_MESSAGE).into_any_element();
+        }
+        div().flex_1().min_w_0().h_full().child(ReaderElement { a11y_lines: Vec::new(), view: cx.entity() }).into_any_element()
     }
 }
 
@@ -1551,15 +1689,15 @@ impl Element for ReaderElement {
     fn prepaint(&mut self, _id: Option<&GlobalElementId>, _i: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _r: &mut (), window: &mut Window, cx: &mut App) -> FrameState {
         let started = Instant::now();
         self.view.update(cx, |v, cx| {
-            v.prepare_frame(bounds, window, cx);
-            v.watch_assets(cx);
+            v.contained((), cx, |v, cx| {
+                crash::fault("reader_prepare");
+                v.prepare_frame(bounds, window, cx);
+                v.watch_assets(cx);
+            })
         });
         if window.is_a11y_active() {
-            let t0 = Instant::now();
-            self.a11y_lines = self.view.read(cx).a11y_lines(bounds);
-            if std::env::var_os("MDV_A11Y_PERF").is_some() {
-                eprintln!("[a11y] {} lines in {:?}", self.a11y_lines.len(), t0.elapsed());
-            }
+            let v = self.view.read(cx);
+            self.a11y_lines = crash::contain(|| v.a11y_lines(bounds)).unwrap_or_default();
         }
         FrameState { hitbox: window.insert_hitbox(bounds, HitboxBehavior::Normal), started }
     }
@@ -1567,24 +1705,28 @@ impl Element for ReaderElement {
     fn paint(&mut self, _id: Option<&GlobalElementId>, _i: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _r: &mut (), state: &mut FrameState, window: &mut Window, cx: &mut App) {
         let view = self.view.clone();
         let cursor = self.view.update(cx, |v, cx| {
-            let c = paint_reader(v, bounds, window, cx);
-            if v.perf.enabled {
-                let now = Instant::now();
-                v.perf.work_ms.push((now - state.started).as_secs_f32() * 1000.0);
-                if let Some(last) = v.perf.last_paint {
-                    v.perf.interval_ms.push((now - last).as_secs_f32() * 1000.0);
+            v.contained(CursorStyle::Arrow, cx, |v, cx| {
+                let c = paint_reader(v, bounds, window, cx);
+                if v.perf.enabled {
+                    let now = Instant::now();
+                    v.perf.work_ms.push((now - state.started).as_secs_f32() * 1000.0);
+                    if let Some(last) = v.perf.last_paint {
+                        v.perf.interval_ms.push((now - last).as_secs_f32() * 1000.0);
+                    }
+                    v.perf.last_paint = Some(now);
                 }
-                v.perf.last_paint = Some(now);
-            }
-            c
+                c
+            })
         });
         window.set_cursor_style(cursor, &state.hitbox);
         // The outline reads this before the reader lays out, so a change needs one more frame.
-        let changed = self.view.update(cx, |v, _| {
-            let cur = v.current_heading();
-            let changed = cur != v.last_heading;
-            v.last_heading = cur;
-            changed
+        let changed = self.view.update(cx, |v, cx| {
+            v.contained(false, cx, |v, _| {
+                let cur = v.current_heading();
+                let changed = cur != v.last_heading;
+                v.last_heading = cur;
+                changed
+            })
         });
         if changed {
             window.on_next_frame(|w, _| w.refresh());
@@ -1596,31 +1738,36 @@ impl Element for ReaderElement {
             let zoom = e.modifiers.secondary(cx);
             if phase == DispatchPhase::Bubble && hb.is_hovered(window) && !zoom {
                 v2.update(cx, |v, cx| {
-                    let d = e.delta.pixel_delta(px(WHEEL_LINE));
-                    let (dx, dy) = (f32::from(d.x), f32::from(d.y));
-                    if !wheel_area(v, e.position, if e.modifiers.shift && dx == 0.0 { dy } else { dx }) {
-                        v.scroll_by(-dy);
-                    }
-                    cx.notify();
+                    v.contained((), cx, |v, cx| {
+                        let d = e.delta.pixel_delta(px(WHEEL_LINE));
+                        let (dx, dy) = (f32::from(d.x), f32::from(d.y));
+                        if !wheel_area(v, e.position, if e.modifiers.shift && dx == 0.0 { dy } else { dx }) {
+                            v.scroll_by(-dy);
+                        }
+                        cx.notify();
+                    })
                 });
             }
         });
         let (hb, v2) = (state.hitbox.clone(), view.clone());
         window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
             if phase == DispatchPhase::Bubble && e.button == MouseButton::Left && hb.is_hovered(window) {
-                v2.update(cx, |v, cx| v.mouse_down(e, window, cx));
+                v2.update(cx, |v, cx| v.contained((), cx, |v, cx| {
+                    crash::fault("reader_mouse");
+                    v.mouse_down(e, window, cx)
+                }));
             }
         });
         let v2 = view.clone();
         window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
             if phase == DispatchPhase::Bubble {
-                v2.update(cx, |v, cx| v.mouse_move(e, window, cx));
+                v2.update(cx, |v, cx| v.contained((), cx, |v, cx| v.mouse_move(e, window, cx)));
             }
         });
         let v2 = view;
         window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
             if phase == DispatchPhase::Bubble && e.button == MouseButton::Left {
-                v2.update(cx, |v, cx| v.mouse_up(e, window, cx));
+                v2.update(cx, |v, cx| v.contained((), cx, |v, cx| v.mouse_up(e, window, cx)));
             }
         });
     }
@@ -1684,7 +1831,8 @@ fn paint_reader(v: &mut ReaderView, bounds: Bounds<Pixels>, window: &mut Window,
     let (mx, my) = (f32::from(mouse.x - bounds.origin.x), f32::from(mouse.y - bounds.origin.y));
     let mut cursor = CursorStyle::Arrow;
     let hover = v.hover;
-    window.with_content_mask(Some(ContentMask { bounds }), |window| {
+    crash::masked(window, ContentMask { bounds }, |window| {
+        crash::fault("reader_paint");
         for vis in &visible {
             let spans = if find_q && v.find.counts.get(vis.chunk).copied().unwrap_or(0) > 0 { Some(v.spans_for(vis.chunk)) } else { None };
             let scrolls: Vec<f32> = vis.layout.areas.iter().map(|a| v.area_scroll.get(&(vis.chunk, a.key)).copied().unwrap_or(0.0)).collect();
@@ -1710,7 +1858,7 @@ fn paint_reader(v: &mut ReaderView, bounds: Bounds<Pixels>, window: &mut Window,
             for (i, area) in vis.layout.areas.iter().enumerate() {
                 let sx = scrolls[i];
                 let clip = Bounds::new(point(bounds.origin.x + px(area.view.x), bounds.origin.y + px(vis.y + area.view.y)), size(px(area.view.w), px(area.view.h)));
-                window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+                crash::masked(window, ContentMask { bounds: clip }, |window| {
                     paint_layer(&vis.layout.layers[i + 1], sx, &ctx, &vis.layout, hovered, i as u32 + 1, &v.images, window, cx);
                 });
                 paint_area_scrollbar(area, sx, &ctx, s.mode, window);

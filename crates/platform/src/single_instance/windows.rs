@@ -95,7 +95,7 @@ impl Listener {
     }
 
     pub fn accept(&self) -> io::Result<Conn> {
-        let pending = self.next.lock().map_err(|_| io::Error::other("poisoned"))?.take();
+        let pending = self.next.lock().unwrap_or_else(|e| e.into_inner()).take();
         let handle = match pending {
             Some(h) => HANDLE(h as *mut _),
             None => create_instance(false)?,
