@@ -59,7 +59,7 @@ impl<K: Copy> Machine<K> {
     }
 
     /// A press on a tab. Any earlier gesture is over: its release can no longer be trusted, so a
-    /// new press never inherits an old one (MISTAKES 35).
+    /// new press never inherits an old one.
     pub fn press(&mut self, tab: K, at: (f32, f32)) {
         self.state = State::Armed { tab, start: at };
     }

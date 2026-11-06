@@ -1,5 +1,5 @@
 //! A loaded document: chunking, outline, bounded parse cache and search. Port of
-//! `internal/doc/doc.go`.
+//! the v0.2 document code.
 //!
 //! Files up to 1 MB are parsed once and their chunks kept. Larger files, and files with lines too
 //! long to lay out, are cut into sections of about 16 KB (see [`split`]), scanned once in parallel

@@ -12,7 +12,7 @@ MD Viewer is a Rust workspace. The result is one executable. Rust is pinned by
 | `crates/content` | Maths and diagrams as SVG (RaTeX, merman), with no GPUI types. |
 | `crates/platform` | Tab-movement and native-window logic that doesn't need GPUI. |
 | `crates/print` | The paginated light-theme PDF. |
-| `crates/theme` | Colour and metric tokens, generated from `design/tokens.json`. |
+| `crates/theme` | Colour tokens, generated from `design/tokens.json`. |
 | `vendor/gpui-pre-windows` | Zed's Windows backend for GPUI with the shader change described below. |
 | `assets/` | Fonts (Geist and the derived MDV Serif), the icon, the macOS bundle files. |
 | `scripts/` | Release, packaging and generator scripts (each has a header comment). |
@@ -103,7 +103,7 @@ copy here (0.3.11, taken from the published crate) differs in these ways:
 
 Not verified without Windows: that the `fxc.exe` path builds and runs (the binding-generation code
 is upstream's, unchanged, and the Rust side was compile-checked here with stand-in bytecode), and
-that the msvc build behaves like the gnu one the owner has tested.
+that the msvc build behaves like the gnu one that has been tried on Windows.
 
 ## macOS
 

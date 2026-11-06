@@ -1,4 +1,4 @@
-//! Cuts a large document into sections at safe block boundaries. Port of `internal/doc/split.go`.
+//! Cuts a large document into sections at safe block boundaries. Port of v0.2's splitter.
 
 /// Splits a section at the next blank line even when the usual safety rules say no, so one
 /// section never grows unbounded.
@@ -364,7 +364,7 @@ mod tests {
     use super::*;
     use std::fmt::Write;
 
-    /// `TestSplitSections` from `internal/doc/doc_test.go`.
+    /// v0.2's `TestSplitSections`.
     #[test]
     fn test_split_sections() {
         let mut b = String::new();

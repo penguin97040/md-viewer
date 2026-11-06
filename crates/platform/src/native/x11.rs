@@ -1,5 +1,4 @@
-//! X11: a private connection, used only during a drag. Hit-testing rules come from MISTAKES 32
-//! and 34: walk the root's children top-down, skip anything unmapped or override-redirect (drag
+//! X11: a private connection, used only during a drag. Hit-testing rules are: walk the root's children top-down, skip anything unmapped or override-redirect (drag
 //! icons, the compositor's helpers), and identify our client inside the WM frame that was hit.
 
 use std::cell::RefCell;

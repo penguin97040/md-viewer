@@ -2,7 +2,7 @@
 //! comments and text so that the reader can map allowed elements to the document model and show
 //! everything else as safe plain text. It never runs anything or fetches anything.
 //!
-//! The allowlist is `internal/doc/render.go`'s bluemonday policy (`UGCPolicy` plus its additions).
+//! The allowlist is v0.2's sanitiser policy (bluemonday's `UGCPolicy` plus its additions).
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Tok<'a> {

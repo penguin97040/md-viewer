@@ -24,7 +24,7 @@ pub use guard::{new_render_owner, set_render_owner};
 pub use raster::{boost_light_on_dark, rasterise, render_svg_image, RgbaImage, SvgImage};
 
 /// Colour scheme of a rendered asset. `Print` is the light scheme with pure-black text and no
-/// background, matching `printDiagrams` in `frontend/extras.js`.
+/// background, as v0.2 printed diagrams.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ContentTheme {
     #[default]

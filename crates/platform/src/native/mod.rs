@@ -9,7 +9,7 @@
 //!   different scale on Windows.
 //! - X11 display `visible_bounds` is the whole screen, ignoring panels.
 //!
-//! Port status against `internal/native`: the Windows hooks and the OLE drop target are not needed
+//! Compared with v0.2: the Windows hooks and the OLE drop target are not needed
 //! here at all, because the web view's native drag session is what made them necessary.
 
 use raw_window_handle::RawWindowHandle;
@@ -78,7 +78,7 @@ pub enum Hit {
 /// treat that as "cancel", never as "outside".
 ///
 /// `ignore` lists our own helper windows (the drag label). They are looked through: what is beneath
-/// them is what the pointer is over (MISTAKES 32).
+/// them is what the pointer is over.
 pub fn hit_at(known: &[NativeWindow], ignore: &[NativeWindow], at: DesktopPoint) -> Option<Hit> {
     match known.first()?.backend() {
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]

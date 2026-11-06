@@ -11,21 +11,4 @@ if rust_dir.is_dir():
     rs += '/// Brand colours as 0xRRGGBB.\n'
     for name, value in colours.items():
         rs += f'pub const BRAND_{name.upper()}: u32 = 0x{value.lstrip("#")};\n'
-    for name, value in tokens['color']['illustration'].items():
-        if '$value' in value:
-            rs += f'pub const ILLUSTRATION_{name.upper()}: u32 = 0x{value["$value"].lstrip("#")};\n'
-    rs += '\n/// Sizes in px at 1x.\n'
-    for name, value in tokens['size'].items():
-        if '$value' in value:
-            rs += f'pub const SIZE_{name.upper()}: f32 = {float(value["$value"]["value"])!r};\n'
-    for name, value in tokens['space'].items():
-        if '$value' in value:
-            rs += f'pub const SPACE_{name}: f32 = {float(value["$value"]["value"])!r};\n'
-    rs += '\n/// Font families and weights.\n'
-    for name, value in tokens['font']['family'].items():
-        if '$value' in value:
-            rs += f'pub const FONT_{name.upper()}: &str = "{value["$value"][0]}";\n'
-    for name, value in tokens['font']['weight'].items():
-        if '$value' in value:
-            rs += f'pub const WEIGHT_{name.upper()}: f32 = {float(value["$value"])!r};\n'
     (rust_dir / 'generated.rs').write_text(rs)

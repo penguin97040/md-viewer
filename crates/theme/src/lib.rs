@@ -2,8 +2,7 @@
 //!
 //! Brand values come from `design/tokens.json` through `generated.rs`. Light-theme values and
 //! the ones tokens.json lacks (`--code-text`, `--mark`, `--mark-current`) are copied by hand from
-//! `frontend/style.css` (the `[data-theme=dark]` block at lines 20-35 and `[data-theme=light]`
-//! at lines 38-53). Colours are plain 0xRRGGBB so this crate needs no GPUI dependency.
+//! the v0.2 style sheet. Colours are plain 0xRRGGBB so this crate needs no GPUI dependency.
 
 mod generated;
 pub use generated::*;
@@ -83,7 +82,7 @@ impl Mode {
     }
 }
 
-/// Layout metrics in px, from `frontend/style.css` (line numbers are for the 0.2.6 file).
+/// Layout metrics in px, from the v0.2 style sheet.
 pub mod metrics {
     /// `#bar` height (81-90).
     pub const BAR_HEIGHT: f32 = 48.0;

@@ -3,7 +3,7 @@
 //! GPUI's text elements take one font size per shaped line and no inline padding or borders, so
 //! they cannot draw `.md code`, `kbd`, `sub` or `sup`. This module shapes style runs through the
 //! [`Shaper`] trait and does its own line breaking, margin collapsing and table sizing, following
-//! `frontend/style.css` lines 389-546. It has no GPUI types, so it can run on any thread and be
+//! the v0.2 style sheet. It has no GPUI types, so it can run on any thread and be
 //! tested without a window. Positions are relative to the top of the chunk.
 
 use std::collections::HashMap;

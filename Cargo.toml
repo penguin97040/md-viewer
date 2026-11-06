@@ -56,7 +56,7 @@ mdv-webimage = { path = "crates/webimage" }
 rcgen = { version = "=0.14.7", default-features = false, features = ["crypto", "ring", "pem"] }
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std"] }
 
-# Measured on the spike: Windows 102 MB by default, 72 MB stripped, 40 MB with fat LTO, 30 MB with
+# Measured on an early build: Windows 102 MB by default, 72 MB stripped, 40 MB with fat LTO, 30 MB with
 # opt-level "s", 26 MB with this profile, 25 MB with "z" everywhere (which nearly doubles find time).
 # Keep panic = "unwind": diagram, maths, PDF and layout panics are contained with catch_unwind.
 [profile.release]
