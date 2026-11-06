@@ -67,6 +67,15 @@ impl Debounce {
         }
     }
 
+    /// Notes that the operating system reported the file being replaced (renamed over, deleted or
+    /// created), which is a change even if the [`Signature`] still looks the same: on Windows the
+    /// file has no identity in it, and two writes in the same clock tick have equal times.
+    pub fn replaced(&mut self, now: Instant) {
+        if self.changed_at.is_none() {
+            self.changed_at = Some(now);
+        }
+    }
+
     /// When the file next needs looking at to end a pending change, if one is pending.
     pub fn due(&self) -> Option<Instant> {
         self.changed_at.map(|at| at + QUIET)
@@ -99,6 +108,8 @@ struct Inbox {
     /// Every path being watched. Events for any other path are dropped on arrival.
     wanted: HashSet<PathBuf>,
     hit: HashSet<PathBuf>,
+    /// Paths among those in `hit` that were reported created, removed or renamed.
+    replaced: HashSet<PathBuf>,
     all: bool,
     kick: bool,
 }
@@ -128,9 +139,16 @@ fn on_event(res: notify::Result<notify::Event>) {
                 ib.all = true;
             }
             let mut any = ib.all;
+            // FSEvents repeats a file's recent history in later events, so there a create or
+            // rename flag proves nothing and the file's identity is compared instead.
+            let replaced = !cfg!(target_os = "macos")
+                && matches!(ev.kind, EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(notify::event::ModifyKind::Name(_)));
             for p in &ev.paths {
                 if ib.wanted.contains(p) {
                     ib.hit.insert(p.clone());
+                    if replaced {
+                        ib.replaced.insert(p.clone());
+                    }
                     any = true;
                 }
             }
@@ -143,6 +161,16 @@ fn on_event(res: notify::Result<notify::Event>) {
     }
     ib.kick = true;
     WAKE.notify_one();
+}
+
+/// Asks the worker to look at every file once. Needed after the folders being watched change:
+/// some platforms (FSEvents) restart their stream for that, and anything that happened to the
+/// other files during the restart is never reported.
+fn kick_all() {
+    if let Some(ib) = inbox().as_mut() {
+        ib.all = true;
+    }
+    kick();
 }
 
 fn kick() {
@@ -205,7 +233,7 @@ impl Watch {
             h.running = true;
         }
         drop(guard);
-        kick();
+        kick_all();
         Watch { id }
     }
 }
@@ -219,6 +247,7 @@ impl Drop for Watch {
             if let Some(ib) = inbox().as_mut() {
                 ib.wanted.remove(&e.path);
                 ib.hit.remove(&e.path);
+                ib.replaced.remove(&e.path);
             }
         }
         if let Some(d) = e.dir {
@@ -237,7 +266,7 @@ impl Drop for Watch {
             h.watcher = None;
         }
         drop(guard);
-        kick();
+        kick_all();
     }
 }
 
@@ -258,14 +287,14 @@ fn folder_watched(file: &Path) -> bool {
 /// files concerned, and reports the ones that have settled.
 fn work() {
     loop {
-        let (hit, all) = {
+        let (hit, replaced, all) = {
             let mut guard = inbox();
             let Some(ib) = guard.as_mut() else { return };
             ib.kick = false;
-            (std::mem::take(&mut ib.hit), std::mem::take(&mut ib.all))
+            (std::mem::take(&mut ib.hit), std::mem::take(&mut ib.replaced), std::mem::take(&mut ib.all))
         };
         let now = Instant::now();
-        let to_look: Vec<(u64, PathBuf)> = {
+        let to_look: Vec<(u64, PathBuf, bool)> = {
             let mut guard = hub();
             let Some(h) = guard.as_mut() else { return };
             if h.entries.is_empty() {
@@ -280,19 +309,22 @@ fn work() {
                         e.next_poll = Some(now + SLOW_POLL);
                     }
                     let due = e.debounce.due().is_some_and(|t| t <= now);
-                    (all || polled || due || hit.contains(&e.path)).then(|| (*id, e.path.clone()))
+                    (all || polled || due || hit.contains(&e.path)).then(|| (*id, e.path.clone(), replaced.contains(&e.path)))
                 })
                 .collect()
         };
         // Looking at the disk happens outside the lock: a slow network share must not stall the UI.
-        let looked: Vec<(u64, Signature)> = to_look.into_iter().map(|(id, p)| (id, Signature::of(&p))).collect();
+        let looked: Vec<(u64, Signature, bool)> = to_look.into_iter().map(|(id, p, rep)| (id, Signature::of(&p), rep)).collect();
         let now = Instant::now();
         let mut fire = Vec::new();
         let wake_at = {
             let mut guard = hub();
             let Some(h) = guard.as_mut() else { return };
-            for (id, sig) in looked {
+            for (id, sig, rep) in looked {
                 if let Some(e) = h.entries.get_mut(&id) {
+                    if rep {
+                        e.debounce.replaced(now);
+                    }
                     if e.debounce.step(sig, now) {
                         fire.push(e.on_change.clone());
                     }
@@ -338,6 +370,16 @@ mod tests {
         assert!(!d.step(sig(2), t0 + Duration::from_millis(250)));
         assert!(d.step(sig(2), t0 + Duration::from_millis(300)));
         assert!(!d.step(sig(2), t0 + Duration::from_millis(500)), "reported once");
+    }
+
+    #[test]
+    fn a_replacement_with_an_identical_signature_is_still_a_change() {
+        let t0 = Instant::now();
+        let mut d = Debounce::new(sig(3));
+        d.replaced(t0);
+        assert!(!d.step(sig(3), t0));
+        assert!(d.step(sig(3), t0 + QUIET));
+        assert!(!d.step(sig(3), t0 + QUIET * 2), "reported once");
     }
 
     #[test]
@@ -440,6 +482,23 @@ mod tests {
         assert!(wait_for(&hits, 3, 2000), "recreate not seen");
         drop(w);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The temporary folder on macOS is reached through a symlink (`/var` is `/private/var`).
+    #[cfg(unix)]
+    #[test]
+    fn a_file_reached_through_a_symlinked_folder_is_seen() {
+        let real = scratch("real");
+        let link = std::env::temp_dir().join(format!("mdv-watch-link-{}", std::process::id()));
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        std::fs::write(real.join("a.md"), "one").unwrap();
+        let (w, hits) = counter(&link, "a.md", true);
+        std::fs::write(link.join("a.md"), "two, longer").unwrap();
+        assert!(wait_for(&hits, 1, 3000), "change through a symlinked folder not seen");
+        drop(w);
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&real);
     }
 
     #[test]

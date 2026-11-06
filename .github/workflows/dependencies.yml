@@ -43,7 +43,7 @@ jobs:
             libxkbcommon-x11-dev libxkbcommon-dev libwayland-dev libxcb1-dev libxcb-xkb-dev \
             libx11-xcb-dev libfontconfig-dev libfreetype-dev libasound2-dev libssl-dev
       - name: Test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --no-fail-fast
       - name: Generated files are current
         if: runner.os == 'Linux'
         run: |

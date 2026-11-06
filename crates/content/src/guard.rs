@@ -207,7 +207,15 @@ mod tests {
         assert_eq!(g.lock().threads, 4, "a refused render starts nothing");
         drop(held);
         wait_until_free(g, 9);
-        assert!(g.lock().stuck.is_empty(), "nothing still counted as stuck");
+        // One free slot only shows that one of the four threads has ended; wait for all of them.
+        let t = Instant::now();
+        while {
+            let s = g.lock();
+            s.threads > 0 || !s.stuck.is_empty()
+        } {
+            assert!(t.elapsed() < Duration::from_secs(5), "the stuck renders never ended");
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 
     #[test]
