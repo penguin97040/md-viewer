@@ -186,6 +186,15 @@ impl ImageStore {
         })
     }
 
+    /// Every picture held, leaving none. Their GPU copies stay in each window's atlas until the view
+    /// releases them, which it can do only from a frame: see `ReaderView::release_retired`.
+    pub fn take_images(&self) -> Vec<Arc<RenderImage>> {
+        locked(&self.entries).drain().filter_map(|(_, e)| match e {
+            Entry::Ready { image, .. } => Some(image),
+            _ => None,
+        }).collect()
+    }
+
     /// Requests made while laying out. The view starts them.
     pub fn take_started(&self) -> Vec<String> {
         std::mem::take(&mut *locked(&self.started))
@@ -481,6 +490,18 @@ mod tests {
             wait_for(&store, ImageState::Failed, &web);
             assert_eq!(store.pending(), 0, "the repaint watcher stops");
         }
+    }
+
+    #[test]
+    fn pictures_can_be_handed_back_for_release() {
+        let fetch: Fetch = Arc::new(|_, _| Some(Arc::new(mdv_webimage::Image { mime: "image/png".into(), data: png() })));
+        let store = ImageStore::with_fetch(None, Arc::new(AtomicBool::new(true)), fetch);
+        let web = ImageSource::Web("https://example.com/a.png".into());
+        store.image(&web);
+        drain(&store);
+        wait_for(&store, ImageState::Ready { width: 0.0, height: 0.0, key: 0 }, &web);
+        assert_eq!(store.take_images().len(), 1);
+        assert!(store.take_images().is_empty());
     }
 
     #[test]

@@ -68,6 +68,17 @@ pub fn fault(name: &str) {
 #[inline(always)]
 pub fn fault(_name: &str) {}
 
+/// Whether a test run wants frame timings kept.
+#[cfg(feature = "dev-harness")]
+pub fn perf_requested() -> bool {
+    std::env::var("MDV_PERF").is_ok()
+}
+
+#[cfg(not(feature = "dev-harness"))]
+pub fn perf_requested() -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

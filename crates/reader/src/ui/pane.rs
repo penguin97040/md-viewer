@@ -158,6 +158,9 @@ pub struct ReaderView {
     web_bar_shown: bool,
     /// A bug stopped this document being drawn. Opening it again clears this.
     failed: bool,
+    /// Pictures no longer used, whose copies in the windows' GPU atlases are yet to be released.
+    /// Nothing else frees those, and each one can be hundreds of megabytes.
+    retired: Vec<Arc<gpui::RenderImage>>,
     images_seen: u64,
     content: ContentStore,
     content_scale: f32,
@@ -221,7 +224,14 @@ const SCROLLBAR: f32 = 12.0;
 const WHEEL_LINE: f32 = 33.3;
 
 impl ReaderView {
-    pub fn new(settings: Settings, _cx: &mut Context<Self>) -> Self {
+    pub fn new(settings: Settings, cx: &mut Context<Self>) -> Self {
+        cx.on_release(|v: &mut Self, cx| {
+            let held = v.images.take_images().into_iter().chain(v.content.take_images()).chain(v.retired.drain(..));
+            for image in held.collect::<Vec<_>>() {
+                cx.drop_image(image, None);
+            }
+        })
+        .detach();
         let web_consent = Arc::new(AtomicBool::new(false));
         Self {
             doc: None,
@@ -256,6 +266,7 @@ impl ReaderView {
             web_dismissed: false,
             web_bar_shown: false,
             failed: false,
+            retired: Vec::new(),
             images_seen: 0,
             content: ContentStore::new(),
             content_scale: 1.0,
@@ -264,7 +275,7 @@ impl ReaderView {
             prefetching: None,
             prefetch_queue_gen: 0,
             last_heading: None,
-            perf: Perf { enabled: std::env::var("MDV_PERF").is_ok(), ..Default::default() },
+            perf: Perf { enabled: crash::perf_requested(), ..Default::default() },
             assets: None,
         }
     }
@@ -293,6 +304,7 @@ impl ReaderView {
 
     pub fn show(&mut self, doc: Arc<Document>) {
         self.failed = false;
+        self.retired.extend(self.images.take_images());
         self.images = Arc::new(ImageStore::new(doc.path.clone(), self.web_consent.clone()));
         self.images_seen = 0;
         self.layouts.clear();
@@ -335,6 +347,7 @@ impl ReaderView {
     fn fail(&mut self, cx: &mut Context<Self>) {
         self.failed = true;
         self.doc = None;
+        self.retired.extend(self.images.take_images());
         self.layouts.clear();
         self.visible.clear();
         self.waiting.clear();
@@ -560,7 +573,17 @@ impl ReaderView {
         .detach();
     }
 
+    /// Frees the GPU copies of pictures nothing draws any more. This runs before the frame paints,
+    /// and whatever replaces them is in the scene that gets presented.
+    fn release_retired(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.retired.extend(self.content.take_retired());
+        for image in self.retired.drain(..) {
+            cx.drop_image(image, Some(&mut *window));
+        }
+    }
+
     fn prepare_frame(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        self.release_retired(window, cx);
         self.bounds = bounds;
         self.visible.clear();
         let Some(doc) = self.doc.clone() else { return };
@@ -1625,12 +1648,8 @@ impl Element for ReaderElement {
             })
         });
         if window.is_a11y_active() {
-            let t0 = Instant::now();
             let v = self.view.read(cx);
             self.a11y_lines = crash::contain(|| v.a11y_lines(bounds)).unwrap_or_default();
-            if std::env::var_os("MDV_A11Y_PERF").is_some() {
-                eprintln!("[a11y] {} lines in {:?}", self.a11y_lines.len(), t0.elapsed());
-            }
         }
         FrameState { hitbox: window.insert_hitbox(bounds, HitboxBehavior::Normal), started }
     }

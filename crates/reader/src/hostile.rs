@@ -140,3 +140,21 @@ fn search_and_outline_over_a_hostile_document() {
         .join()
         .unwrap();
 }
+
+/// Found by fuzzing: a raw image at the end of a paragraph.
+#[test]
+fn inline_image_at_the_end_of_text() {
+    for src in [
+        "a\n<img src=\"https://a.example/b.png\" width=\"3\">\n",
+        "$$x^2$$\n<img src=\"https://a.example/b.png\">\n",
+        "$$x^2$$\n}](\n<img src=\"https://a.example/b.png\" width=\"3\">\n",
+        "x}](\n<img src=\"https://a.example/b.png\">\n",
+        "x}](\n<img src=\"b.png\">\n",
+    ] {
+        let w = parse_whole(src, 1 << 30, false);
+        let c = &w.chunks[0];
+        for a in [&NoAssets as &dyn Assets, &Huge] {
+            layout_chunk(c, &OPTS, &ChunkState::default(), true, true, &mut Fake, a);
+        }
+    }
+}

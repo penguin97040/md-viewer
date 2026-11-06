@@ -86,6 +86,8 @@ struct Map {
     sharp: HashMap<u64, (u64, u32)>,
     /// Per diagram, the key of the newest size-matched raster that finished.
     last_ready: HashMap<u64, u64>,
+    /// Pictures let go of, whose GPU copies the view is yet to release.
+    retired: Vec<Arc<RenderImage>>,
 }
 
 struct Inner {
@@ -161,6 +163,23 @@ impl ContentStore {
     /// Requests not yet finished.
     pub fn outstanding(&self) -> usize {
         self.inner.outstanding.load(Ordering::Acquire)
+    }
+
+    /// Pictures this store has let go of since the last call.
+    pub fn take_retired(&self) -> Vec<Arc<RenderImage>> {
+        std::mem::take(&mut locked(&self.inner.map).retired)
+    }
+
+    /// Every picture held, for a document that is closing.
+    pub fn take_images(&self) -> Vec<Arc<RenderImage>> {
+        let mut m = locked(&self.inner.map);
+        let mut out = std::mem::take(&mut m.retired);
+        out.extend(m.entries.drain().filter_map(|(_, e)| match e {
+            Entry::Ready { image, .. } => Some(image),
+            _ => None,
+        }));
+        m.bytes = 0;
+        out
     }
 
     /// Keys finished since the last call.
@@ -388,8 +407,9 @@ fn worker(inner: Arc<Inner>) {
                 if let Kind::Sharp { base, .. } = &job.kind {
                     // The older size-matched raster has been replaced; its memory goes.
                     if let Some(old) = m.last_ready.insert(*base, job.key).filter(|o| *o != job.key) {
-                        if let Some(Entry::Ready { bytes, .. }) = m.entries.remove(&old) {
+                        if let Some(Entry::Ready { bytes, image, .. }) = m.entries.remove(&old) {
                             m.bytes -= bytes;
+                            m.retired.push(image);
                         }
                     }
                 }
@@ -414,8 +434,9 @@ fn evict(m: &mut Map) {
         }) else {
             break;
         };
-        if let Some(Entry::Ready { bytes, .. }) = m.entries.remove(&k) {
+        if let Some(Entry::Ready { bytes, image, .. }) = m.entries.remove(&k) {
             m.bytes -= bytes;
+            m.retired.push(image);
         }
     }
 }
