@@ -6,11 +6,11 @@ executable with no installer and no runtime to set up, written in Rust with
 under Releases.
 
 <p align="center">
-  <a href="docs/screenshots/dark.png"><img src="docs/screenshots/dark.png" width="560" alt="MD Viewer in the dark theme, with tabs, a table of contents and a table"></a>
+  <a href="docs/screenshots/dark.png"><img src="docs/screenshots/dark.png" width="560" alt="MD Viewer in the dark theme, with tabs, a table of contents, a table and a Mermaid diagram"></a>
 </p>
 <p align="center">
-  <a href="docs/screenshots/light.png"><img src="docs/screenshots/light.png" width="180" alt="Light theme with maths and highlighted code"></a>
-  <a href="docs/screenshots/diagrams.png"><img src="docs/screenshots/diagrams.png" width="180" alt="Mermaid diagram and maths"></a>
+  <a href="docs/screenshots/light.png"><img src="docs/screenshots/light.png" width="180" alt="Light theme with a task list and highlighted code"></a>
+  <a href="docs/screenshots/diagrams.png"><img src="docs/screenshots/diagrams.png" width="180" alt="Dark theme with maths and highlighted code"></a>
   <a href="docs/screenshots/find.png"><img src="docs/screenshots/find.png" width="180" alt="Find with highlighted matches"></a>
   <a href="docs/screenshots/settings.png"><img src="docs/screenshots/settings.png" width="180" alt="Settings"></a>
 </p>

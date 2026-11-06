@@ -91,6 +91,7 @@ shoot() {
 
 shoot dark
 shoot diagrams Next
-shoot light ctrl+shift+d Next
 shoot find ctrl+f "type:hut" Return
 shoot settings "click:$GEAR_X,$GEAR_Y"
+# Last, because the theme choice is saved in the settings the later shots would start from.
+shoot light ctrl+shift+d Next
