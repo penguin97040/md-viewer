@@ -17,9 +17,6 @@ The three MDV Serif faces are modified versions of Geist Serif made by `scripts/
 font. They stay under the OFL, and the derived files are in `assets/fonts/`. The licence text is
 `assets/fonts/OFL-Geist.txt` and is shown in the app's Settings.
 
-The 1.0 interface no longer uses Chakra Petch or Share Tech Mono, which earlier versions
-bundled.
-
 ## Maths fonts and syntax definitions
 
 - `ratex-svg` (feature `embed-fonts`) embeds the KaTeX maths fonts, used to draw maths as outlines.
