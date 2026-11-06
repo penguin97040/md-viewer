@@ -11,6 +11,8 @@
 //! Setting `MDV_REQUIRE_PRECOMPILED_SHADERS` makes a build without the feature fail, so a release
 //! cannot be made with run-time compilation by accident.
 
+mod shader_header;
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=MDV_REQUIRE_PRECOMPILED_SHADERS");
@@ -268,18 +270,12 @@ mod shader_compilation {
 
     fn generate_rust_binding(const_name: &str, head_file: &str, output_path: &str) {
         let header_content = fs::read_to_string(head_file).expect("Failed to read header file");
-        let const_definition = {
-            let global_var_start = header_content.find("const BYTE").unwrap();
-            let global_var = &header_content[global_var_start..];
-            let equal = global_var.find('=').unwrap();
-            global_var[equal + 1..].trim()
-        };
-        let bytes: Vec<u8> = const_definition
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .filter_map(|t| t.strip_prefix("0x"))
-            .filter_map(|t| u8::from_str_radix(t, 16).ok())
-            .collect();
-        if bytes.len() < 32 || !bytes.starts_with(b"DXBC") {
+        let global_var_start = header_content.find("const BYTE").unwrap();
+        let global_var = &header_content[global_var_start..];
+        let equal = global_var.find('=').unwrap();
+        let const_definition = global_var[equal + 1..].trim();
+        let bytes = crate::shader_header::parse_fxc_header(&header_content).unwrap_or_default();
+        if !crate::shader_header::is_dxbc(&bytes) {
             println!(
                 "cargo::error=Shader {const_name} compiled to {} bytes that are not a DXBC blob",
                 bytes.len()
