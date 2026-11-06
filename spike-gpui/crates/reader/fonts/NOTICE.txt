@@ -1,8 +1,0 @@
-ChakraPetch-Italic.ttf and ChakraPetch-SemiBoldItalic.ttf are unmodified files from the Chakra
-Petch family (SIL Open Font License 1.1). See frontend/fonts/OFL-ChakraPetch.txt.
-
-MDVMonoOblique.ttf is Share Tech Mono (Copyright 2012 Carrois Type Design, Ralph du Carrois) with
-every outline sheared by 0.25 and renamed, because that font's licence reserves the name "Share".
-SIL Open Font License 1.1. See frontend/fonts/OFL-ShareTechMono.txt.
-
-They exist because GPUI, unlike a browser, does not synthesise italics for a font without them.

@@ -1,7 +1,5 @@
 # Build output
 build/bin/
-build/wailsjs/
-frontend/wailsjs/
 
 # Generated test files
 testdata/big*.md
@@ -11,4 +9,4 @@ testdata/big*.md
 Thumbs.db
 .vscode/
 .idea/
-spike-gpui/target/
+target/
