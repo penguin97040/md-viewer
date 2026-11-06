@@ -294,7 +294,7 @@ mod tests {
         (x.max(y) + 0.05) / (x.min(y) + 0.05)
     }
 
-    /// MISTAKES 11: code printed in the dark theme's colours came out white on white. Every token
+    /// Regression: code printed in the dark theme's colours came out white on white. Every token
     /// class must be readable on the print code background.
     #[test]
     fn every_token_class_is_readable_on_paper() {
