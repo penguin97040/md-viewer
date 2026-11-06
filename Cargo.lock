@@ -3426,6 +3426,7 @@ dependencies = [
  "mdv-theme",
  "mdv-webimage",
  "rustybuzz",
+ "unicode-segmentation",
  "usvg 0.47.0",
 ]
 

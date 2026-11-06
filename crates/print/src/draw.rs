@@ -54,7 +54,8 @@ impl<'a> Pdf<'a> {
             fonts.push(Font::new(data.into(), 0).ok_or_else(|| PrintError::Pdf(format!("font {} could not be read", f.name)))?);
         }
         let mut db = usvg::fontdb::Database::new();
-        for f in set.fonts.iter().take(8) {
+        // Diagram text falls back among these, as text in the page does.
+        for f in set.fonts.iter().take(9) {
             db.load_font_data(f.data.to_vec());
         }
         db.set_sans_serif_family("Geist");

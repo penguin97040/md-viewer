@@ -91,11 +91,46 @@ impl FontSet {
     }
 
     pub fn index(&self, f: FontSpec) -> usize {
+        self.chain(f)[0]
+    }
+
+    /// The fonts to try for a character, in order. Geist Serif has the fewest characters, so it
+    /// falls back to Geist, as it does on screen; Geist Mono has the most.
+    pub fn chain(&self, f: FontSpec) -> [usize; 3] {
         let style = usize::from(f.bold) + 2 * usize::from(f.italic);
         match f.family {
-            Family::Sans => self.sans[style],
-            Family::Mono => self.mono[style],
-            Family::Serif => self.serif[style],
+            Family::Serif => [self.serif[style], self.sans[style], self.mono[style]],
+            Family::Sans => [self.sans[style], self.mono[style], self.serif[style]],
+            Family::Mono => [self.mono[style], self.sans[style], self.serif[style]],
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Contours(usize);
+    impl rustybuzz::ttf_parser::OutlineBuilder for Contours {
+        fn move_to(&mut self, _x: f32, _y: f32) {
+            self.0 += 1;
+        }
+        fn line_to(&mut self, _x: f32, _y: f32) {}
+        fn quad_to(&mut self, _a: f32, _b: f32, _x: f32, _y: f32) {}
+        fn curve_to(&mut self, _a: f32, _b: f32, _c: f32, _d: f32, _x: f32, _y: f32) {}
+        fn close(&mut self) {}
+    }
+
+    /// A derived bold whose stroke cancels the glyph comes out as outlined, hollow letters.
+    #[test]
+    fn derived_bold_letters_are_solid() {
+        let set = FontSet::new();
+        for (bold, italic) in [(true, false), (true, true)] {
+            let f = &set.fonts[set.index(FontSpec { family: Family::Serif, bold, italic })];
+            let g = f.face.glyph_index('l').expect("l");
+            let mut c = Contours(0);
+            f.face.outline_glyph(g, &mut c);
+            assert_eq!(c.0, 1, "{}", f.name);
         }
     }
 }

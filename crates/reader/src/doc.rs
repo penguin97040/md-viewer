@@ -1,9 +1,10 @@
 //! A loaded document: chunking, outline, bounded parse cache and search. Port of
 //! `internal/doc/doc.go`.
 //!
-//! Files up to 1 MB are parsed once and their chunks kept. Larger files are cut into safe sections
-//! of about 16 KB, scanned once in parallel for headings and link references (nothing else of that
-//! parse is kept), then each section is parsed again when asked for, with a bounded cache.
+//! Files up to 1 MB are parsed once and their chunks kept. Larger files, and files with lines too
+//! long to lay out, are cut into sections of about 16 KB (see [`split`]), scanned once in parallel
+//! for headings and link references (nothing else of that parse is kept), then each section is
+//! parsed again when asked for, with a bounded cache.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -22,16 +23,21 @@ use crate::split;
 pub const TARGET_CHUNK_BYTES: usize = 16 * 1024;
 pub const WHOLE_PARSE_LIMIT: usize = 1 << 20;
 pub const CACHE_LIMIT: usize = 96;
+/// Chunks can be much larger than the target when a file has no block boundaries to cut at.
+const CACHE_TEXT_BYTES: usize = 4 << 20;
 pub const MAX_FILE_BYTES: u64 = 256 << 20;
 
 /// What the viewer needs to estimate a chunk's height before parsing it.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct ChunkMeta {
     pub start: u32,
     pub end: u32,
     pub lines: u32,
     pub first_heading: u32,
     pub heading_count: u32,
+    /// Carries on from the chunk before, with no block boundary between them.
+    pub joined: bool,
+    prefix: split::Prefix,
 }
 
 impl ChunkMeta {
@@ -49,6 +55,8 @@ enum Mode {
 struct Cache {
     map: HashMap<u32, (Arc<ChunkContent>, u64)>,
     clock: u64,
+    /// Flat text held in `map`.
+    bytes: usize,
     /// Parses done since the document opened; a test and the performance log read it.
     parses: u64,
 }
@@ -110,7 +118,7 @@ impl Document {
     pub fn parse(bytes: Vec<u8>) -> Self {
         let t = Instant::now();
         let source: Arc<str> = normalise_newlines(bytes).into();
-        let mut d = if source.len() <= WHOLE_PARSE_LIMIT { Self::parse_whole(source) } else { Self::parse_sections(source) };
+        let mut d = if source.len() <= WHOLE_PARSE_LIMIT && !split::has_long_lines(&source) { Self::parse_whole(source) } else { Self::parse_sections(source) };
         d.parse_time = t.elapsed();
         d
     }
@@ -121,7 +129,7 @@ impl Document {
         let mut chunks: Vec<ChunkMeta> = w
             .ranges
             .iter()
-            .map(|&(s, e)| ChunkMeta { start: s, end: e, lines: count_lines(&b[s as usize..e as usize]), first_heading: 0, heading_count: 0 })
+            .map(|&(s, e)| ChunkMeta { start: s, end: e, lines: count_lines(&b[s as usize..e as usize]), first_heading: 0, heading_count: 0, joined: false, prefix: split::Prefix::None })
             .collect();
         fill_heading_ranges(&mut chunks, &w.headings);
         let mut contents = w.chunks;
@@ -141,13 +149,13 @@ impl Document {
     }
 
     fn parse_sections(source: Arc<str>) -> Self {
-        let ranges = split::split_sections(&source, TARGET_CHUNK_BYTES);
-        let scans: Vec<parse::SectionScan> = ranges.par_iter().map(|&(s, e)| parse::scan_section(&source[s..e])).collect();
+        let sections = split::sections(&source, TARGET_CHUNK_BYTES);
+        let scans: Vec<parse::SectionScan> = sections.par_iter().map(|s| parse::scan_section(&with_prefix(&source, s.start, s.end, s.prefix))).collect();
         let b = source.as_bytes();
-        let lines: Vec<u32> = ranges.par_iter().map(|&(s, e)| count_lines(&b[s..e])).collect();
+        let lines: Vec<u32> = sections.par_iter().map(|s| count_lines(&b[s.start..s.end])).collect();
         let mut slugs = Slugger::new();
         let mut headings = Vec::with_capacity(scans.iter().map(|s| s.headings.len()).sum());
-        let mut chunks = Vec::with_capacity(ranges.len());
+        let mut chunks = Vec::with_capacity(sections.len());
         let mut refs = RefMap::default();
         for (ci, scan) in scans.into_iter().enumerate() {
             let first = headings.len() as u32;
@@ -165,7 +173,8 @@ impl Document {
             for (label, dest, title) in scan.refs {
                 refs.0.entry(label).or_insert((dest, title));
             }
-            chunks.push(ChunkMeta { start: ranges[ci].0 as u32, end: ranges[ci].1 as u32, lines: lines[ci], first_heading: first, heading_count: n });
+            let sec = sections[ci];
+            chunks.push(ChunkMeta { start: sec.start as u32, end: sec.end as u32, lines: lines[ci], first_heading: first, heading_count: n, joined: sec.joined, prefix: sec.prefix });
         }
         Self {
             source,
@@ -192,7 +201,12 @@ impl Document {
 
     fn parse_chunk(&self, i: usize, colours: bool) -> ChunkContent {
         let m = &self.chunks[i];
-        parse::parse_section(&self.source[m.start as usize..m.end as usize], m.start, i as u32, &self.refs, &self.section_ids(i), colours)
+        let src = with_prefix(&self.source, m.start as usize, m.end as usize, m.prefix);
+        let base = m.start - (src.len() as u32 - m.bytes());
+        let mut c = parse::parse_part(&src, base, i as u32, &self.refs, &self.section_ids(i), colours, matches!(m.prefix, split::Prefix::Table(..)));
+        c.joined_before = m.joined;
+        c.joined_after = self.chunks.get(i + 1).is_some_and(|n| n.joined);
+        c
     }
 
     /// A parsed chunk, from the cache or parsed now. Safe from any thread.
@@ -208,10 +222,14 @@ impl Document {
                 g.clock += 1;
                 g.parses += 1;
                 let clock = g.clock;
-                g.map.insert(i as u32, (content.clone(), clock));
-                if g.map.len() > CACHE_LIMIT {
-                    if let Some(old) = g.map.iter().min_by_key(|(_, v)| v.1).map(|(k, _)| *k) {
-                        g.map.remove(&old);
+                g.bytes += content.text.len();
+                if let Some(old) = g.map.insert(i as u32, (content.clone(), clock)) {
+                    g.bytes -= old.0.text.len();
+                }
+                while g.map.len() > CACHE_LIMIT || (g.bytes > CACHE_TEXT_BYTES && g.map.len() > 8) {
+                    let Some(old) = g.map.iter().min_by_key(|(_, v)| v.1).map(|(k, _)| *k) else { break };
+                    if let Some(gone) = g.map.remove(&old) {
+                        g.bytes -= gone.0.text.len();
                     }
                 }
                 content
@@ -306,13 +324,75 @@ impl Document {
             .collect();
         let total: usize = parts.iter().map(|p| p.len() + SEP_BLOCK.len()).sum();
         let mut out = String::with_capacity(total);
-        for p in parts.iter().filter(|p| !p.is_empty()) {
+        for (ci, p) in (a.chunk as usize..).zip(&parts) {
+            if p.is_empty() {
+                continue;
+            }
             if !out.is_empty() {
-                out.push_str(SEP_BLOCK);
+                out.push_str(self.separator_before(ci));
             }
             out.push_str(p);
         }
         out
+    }
+
+    /// What joins chunk `ci`'s text to the text before it.
+    fn separator_before(&self, ci: usize) -> &'static str {
+        let m = &self.chunks[ci];
+        if !m.joined {
+            return SEP_BLOCK;
+        }
+        // A part keeps its own text; what parsing took away at the cut goes back. Code keeps its
+        // own line ends, and a table's rows have none.
+        match (m.prefix, self.source.as_bytes()[m.start as usize - 1]) {
+            (split::Prefix::Table(..), _) => SEP_LINE,
+            (split::Prefix::Fence(..), b'\n') => SEP_LINE,
+            (split::Prefix::Fence(..), _) => "",
+            (_, b'\n') => SEP_LINE,
+            (_, b' ') => " ",
+            _ => "",
+        }
+    }
+
+    /// The whole text of the code block whose part in chunk `ci` has the text `span`: a block too
+    /// long for one chunk has a part in each of several.
+    pub fn code_text(&self, ci: usize, span: ByteSpan) -> String {
+        let fence_part = |i: usize| self.chunks[i].joined && matches!(self.chunks[i].prefix, split::Prefix::Fence(..));
+        let code_span = |b: Option<&Block>| match b {
+            Some(Block::Code(c)) => Some(c.text),
+            _ => None,
+        };
+        let c = self.chunk(ci);
+        let at_start = fence_part(ci) && code_span(c.blocks.first()) == Some(span);
+        let at_end = ci + 1 < self.chunks.len() && fence_part(ci + 1) && code_span(c.blocks.last()) == Some(span);
+        if !at_start && !at_end {
+            return c.slice(span).to_string();
+        }
+        let mut a = DocPos::new(ci as u32, span.start);
+        let mut i = ci;
+        if at_start {
+            while fence_part(i) {
+                i -= 1;
+                let prev = self.chunk(i);
+                a = DocPos::new(i as u32, code_span(prev.blocks.last()).map_or(0, |s| s.start));
+                if code_span(prev.blocks.first()) != code_span(prev.blocks.last()) {
+                    break;
+                }
+            }
+        }
+        let mut b = DocPos::new(ci as u32, span.end);
+        let mut i = ci;
+        if at_end {
+            while i + 1 < self.chunks.len() && fence_part(i + 1) {
+                i += 1;
+                let next = self.chunk(i);
+                b = DocPos::new(i as u32, code_span(next.blocks.first()).map_or(0, |s| s.end));
+                if code_span(next.blocks.first()) != code_span(next.blocks.last()) {
+                    break;
+                }
+            }
+        }
+        self.text_between(a, b)
     }
 
     /// The chunk holding an element id, looking at headings and at any parsed chunk.
@@ -329,6 +409,20 @@ impl Document {
         let i = h.chunk as usize;
         let c = self.chunk(i);
         c.anchors.iter().find(|a| a.id == h.id).map(|a| (i, a.offset))
+    }
+}
+
+/// A section's text, with what must be parsed ahead of it.
+fn with_prefix(source: &str, start: usize, end: usize, prefix: split::Prefix) -> std::borrow::Cow<'_, str> {
+    match prefix {
+        split::Prefix::None => source[start..end].into(),
+        split::Prefix::Fence(a, b) | split::Prefix::Table(a, b) => {
+            let (a, b) = (a as usize, b as usize);
+            let mut s = String::with_capacity(b - a + end - start);
+            s.push_str(&source[a..b]);
+            s.push_str(&source[start..end]);
+            s.into()
+        }
     }
 }
 
@@ -408,6 +502,82 @@ mod tests {
 
     use super::*;
     use std::fmt::Write;
+
+    #[test]
+    fn one_long_line_reads_back_whole() {
+        let src = "plain word ".repeat(1 << 18);
+        let d = Document::parse(src.clone().into_bytes());
+        assert!(d.chunks.len() > 10);
+        assert!(d.chunks[1..].iter().all(|m| m.joined));
+        let end = DocPos::new(d.chunks.len() as u32 - 1, u32::MAX);
+        assert_eq!(d.text_between(DocPos::new(0, 0), end), src.trim_end());
+        let (first, last) = (d.chunk(0), d.chunk(d.chunks.len() - 1));
+        assert!(!first.joined_before && first.joined_after && last.joined_before && !last.joined_after);
+        assert_eq!(d.search("plain").iter().sum::<u32>(), 1 << 18);
+    }
+
+    #[test]
+    fn a_short_line_paragraph_reads_back_whole() {
+        let src = "word\n".repeat(1 << 18);
+        let d = Document::parse(src.clone().into_bytes());
+        assert!(d.chunks.len() > 5);
+        let end = DocPos::new(d.chunks.len() as u32 - 1, u32::MAX);
+        assert_eq!(d.text_between(DocPos::new(0, 0), end).split_whitespace().count(), 1 << 18);
+    }
+
+    #[test]
+    fn a_long_code_block_stays_code_and_copies_whole() {
+        let code = "# not a heading\n".repeat(1 << 17);
+        let src = format!("Before.\n\n```python\n{code}```\n\nAfter.\n");
+        let d = Document::parse(src.into_bytes());
+        assert!(d.chunks.len() > 3);
+        assert!(d.headings.is_empty(), "{}", d.headings.len());
+        for i in 1..d.chunks.len() - 1 {
+            let c = d.chunk(i);
+            let Some(Block::Code(b)) = c.blocks.first() else { panic!("{i}: {:?}", c.blocks.first()) };
+            assert_eq!(b.lang.as_deref(), Some("python"));
+        }
+        let mid = d.chunks.len() / 2;
+        let Block::Code(b) = &d.chunk(mid).blocks[0] else { panic!() };
+        assert_eq!(d.code_text(mid, b.text), code.trim_end());
+        let last = d.chunk(d.chunks.len() - 1);
+        assert!(matches!(last.blocks.last(), Some(Block::Paragraph { .. })));
+    }
+
+    #[test]
+    fn a_long_table_keeps_its_columns_and_one_header() {
+        let rows = 1usize << 17;
+        let src = format!("Intro.\n\n| first | second |\n|---|:--|\n{}\nAfter.\n", "| 1 | 2 |\n".repeat(rows));
+        let d = Document::parse(src.into_bytes());
+        assert!(d.chunks.len() > 1);
+        let mut total = 0;
+        for i in 0..d.chunks.len() {
+            let c = d.chunk(i);
+            for b in &c.blocks {
+                if let Block::Table(t) = b {
+                    assert_eq!(!t.head.is_empty(), i == 0, "chunk {i}");
+                    assert_eq!(t.aligns.len(), 2);
+                    assert!(t.rows.iter().all(|r| r.cells.len() == 2));
+                    total += t.rows.len();
+                }
+            }
+        }
+        assert_eq!(total, rows);
+        assert_eq!(d.search("first").iter().sum::<u32>(), 1);
+        let end = DocPos::new(d.chunks.len() as u32 - 1, u32::MAX);
+        let text = d.text_between(DocPos::new(0, 0), end);
+        assert_eq!(text.matches('\t').count(), rows + 1);
+        assert_eq!(text.lines().filter(|l| *l == "1\t2").count(), rows);
+    }
+
+    #[test]
+    fn a_small_table_in_a_large_file_is_not_touched() {
+        let mut src = String::from("| a | b |\n|---|---|\n| 1 | 2 |\n\n");
+        src.push_str(&"Paragraph.\n\n".repeat(1 << 18));
+        let d = Document::parse(src.into_bytes());
+        assert!(d.chunks.iter().all(|m| !m.joined));
+        assert!(matches!(&d.chunk(0).blocks[0], Block::Table(t) if t.head.len() == 1));
+    }
 
     fn big_doc(n: usize) -> Vec<u8> {
         let mut b = String::new();

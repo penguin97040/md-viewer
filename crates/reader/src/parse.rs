@@ -117,11 +117,19 @@ enum Ids<'a> {
 
 /// One parsed section of a large file.
 pub fn parse_section(src: &str, base: u32, index: u32, refs: &RefMap, ids: &[String], colours: bool) -> ChunkContent {
+    parse_part(src, base, index, refs, ids, colours, false)
+}
+
+/// One part of a section cut where no block boundary was available. `src` begins with what makes
+/// the part mean what it meant in the whole, and `base` allows for that. With `drop_table_head`,
+/// that was a table's header, which only the first part shows.
+pub fn parse_part(src: &str, base: u32, index: u32, refs: &RefMap, ids: &[String], colours: bool, drop_table_head: bool) -> ChunkContent {
     let mut cb = |link: BrokenLink<'_>| -> Option<(CowStr<'_>, CowStr<'_>)> {
         refs.0.get(&normalise_label(&link.reference)).map(|(d, t)| (CowStr::from(d.clone()), CowStr::from(t.clone())))
     };
     let parser = Parser::new_with_broken_link_callback(src, options(), Some(&mut cb));
     let mut b = Builder::new(src, base, index, Ids::Assigned(ids), colours);
+    b.drop_table_head = drop_table_head;
     b.run(parser.into_offset_iter(), None);
     b.finish_chunk().0
 }
@@ -242,6 +250,9 @@ struct Builder<'a, 's> {
     note_order: Vec<String>,
     note_numbers: HashMap<String, (u32, u32)>,
     headings: Vec<HeadingInfo>,
+    drop_table_head: bool,
+    /// The flat text to go back to when the table's header is dropped.
+    table_mark: (usize, usize),
 }
 
 const fn sep_rank(s: &str) -> u8 {
@@ -284,6 +295,8 @@ impl<'a, 's> Builder<'a, 's> {
             note_order: Vec::new(),
             note_numbers: HashMap::new(),
             headings: Vec::new(),
+            drop_table_head: false,
+            table_mark: (0, 0),
         }
     }
 
@@ -729,6 +742,8 @@ impl<'a, 's> Builder<'a, 's> {
             text: std::mem::take(&mut self.text),
             blocks,
             no_find: std::mem::take(&mut self.no_find),
+            joined_before: false,
+            joined_after: false,
             anchors: std::mem::take(&mut self.anchors),
         };
         self.sep = None;
@@ -900,6 +915,7 @@ impl<'a, 's> Builder<'a, 's> {
                 self.close_inline(start);
                 self.want_sep(SEP_BLOCK);
                 self.mark();
+                self.table_mark = (self.text.len(), self.no_find.len());
                 let aligns = aligns
                     .iter()
                     .map(|a| match a {
@@ -1000,6 +1016,14 @@ impl<'a, 's> Builder<'a, 's> {
                     if let Some(r) = row.take() {
                         head.push(r);
                     }
+                    if self.drop_table_head {
+                        head.clear();
+                        self.drop_table_head = false;
+                        self.text.truncate(self.table_mark.0);
+                        self.no_find.truncate(self.table_mark.1);
+                        self.sep = None;
+                        return;
+                    }
                 }
                 self.want_sep(SEP_LINE);
             }
@@ -1080,7 +1104,7 @@ impl<'a, 's> Builder<'a, 's> {
             self.pop_frame(end);
         }
         self.write_notes(end);
-        let c = ChunkContent { index: self.index, text: self.text, blocks: std::mem::take(&mut self.frames[0].blocks), no_find: self.no_find, anchors: self.anchors };
+        let c = ChunkContent { index: self.index, text: self.text, blocks: std::mem::take(&mut self.frames[0].blocks), no_find: self.no_find, anchors: self.anchors, joined_before: false, joined_after: false };
         (c, self.headings)
     }
 

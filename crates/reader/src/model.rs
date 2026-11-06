@@ -90,6 +90,11 @@ pub struct ChunkContent {
     pub no_find: Vec<ByteSpan>,
     /// Element ids in this chunk (headings and footnotes), with the text offset they point at.
     pub anchors: Vec<Anchor>,
+    /// This chunk carries on from the one before: no block boundary was available to cut at (see
+    /// `split::sections`), so the two are drawn with no gap.
+    pub joined_before: bool,
+    /// The next chunk carries on from this one.
+    pub joined_after: bool,
 }
 
 impl ChunkContent {

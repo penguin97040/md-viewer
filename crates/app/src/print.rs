@@ -167,7 +167,7 @@ impl AppView {
             PrintState::Done { path, report, bytes } => {
                 self.print = None;
                 eprintln!("[print] {} pages, {} bytes, {}", report.pages, bytes, path.display());
-                self.show_saved(path, cx);
+                self.show_saved(path, missing_note(&report), cx);
                 false
             }
             PrintState::Failed(e) => {
@@ -185,10 +185,10 @@ impl AppView {
     }
 
     /// "Saved <name>" with an Open action. It stays for a while so there is time to reach it.
-    fn show_saved(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    fn show_saved(&mut self, path: PathBuf, note: String, cx: &mut Context<Self>) {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "PDF".into());
         // Not `show_toast`, whose four-second timer would hide it before there is time to click.
-        self.toast = Some((format!("Saved {name}"), false));
+        self.toast = Some((format!("Saved {name}{note}"), false));
         self.toast_open = Some(path.clone());
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -243,4 +243,18 @@ mod tests {
         assert_eq!(with_pdf_extension(PathBuf::from("/a/b.pdf")), (PathBuf::from("/a/b.pdf"), false));
         assert_eq!(with_pdf_extension(PathBuf::from("/a/b.txt")), (PathBuf::from("/a/b.txt"), false));
     }
+}
+
+/// What the saved message adds when the PDF's fonts could not draw part of the text: a PDF has only
+/// the fonts built in, so a character none of them has comes out as an empty box.
+fn missing_note(report: &mdv_print::Report) -> String {
+    if report.missing_glyphs == 0 {
+        return String::new();
+    }
+    let mut names: String = report.missing_sample.iter().flat_map(|c| [*c, ' ']).collect();
+    names.truncate(names.trim_end().len());
+    if report.missing_glyphs > report.missing_sample.len() {
+        names.push_str(" and others");
+    }
+    format!(". {} characters show as empty boxes because the PDF fonts do not have them: {names}", report.missing_glyphs)
 }

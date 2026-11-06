@@ -1,5 +1,6 @@
 //! The reader: markdown document model, parser and on-screen view.
 
+pub mod access;
 pub mod autolink;
 pub mod doc;
 pub mod fold;

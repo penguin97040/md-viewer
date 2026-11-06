@@ -28,9 +28,9 @@ def outline(glyph_set, name, bold):
         thick = pathops.Path(path)
         thick.stroke(BOLD_STROKE, pathops.LineCap.BUTT_CAP, pathops.LineJoin.MITER_JOIN, 4)
         thick.convertConicsToQuads()
-        merged = pathops.Path()
-        pathops.union([path, thick], merged.getPen())
-        path = merged
+        # Each operand keeps its own fill. Merging the contours as one path makes the stroke's
+        # winding cancel the glyph's, which leaves the letters hollow.
+        path = pathops.op(path, thick, pathops.PathOp.UNION)
     return path
 
 

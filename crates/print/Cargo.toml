@@ -13,6 +13,7 @@ mdv-webimage.workspace = true
 krilla.workspace = true
 krilla-svg.workspace = true
 rustybuzz.workspace = true
+unicode-segmentation.workspace = true
 usvg.workspace = true
 image.workspace = true
 

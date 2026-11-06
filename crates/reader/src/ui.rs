@@ -2,6 +2,7 @@
 
 pub mod content;
 pub mod crash;
+pub mod exposure;
 pub mod field;
 pub mod images;
 pub mod pane;
