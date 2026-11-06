@@ -146,12 +146,22 @@ fn looks_serif(name: &str) -> bool {
         || ["mincho", "song", "ming", "times", "georgia", "garamond", "palatino", "cambria", "batang", "myeongjo", "simsun", "minion", "charter", "bookman", "roman"].iter().any(|k| n.contains(k))
 }
 
+/// Placeholder faces (macOS ships LastResort, whose cmap covers every code point but only draws a
+/// box naming the Unicode block) must never count as drawing a character.
+fn is_placeholder(name: &str) -> bool {
+    let n: String = name.chars().filter(|c| !c.is_whitespace() && *c != '-' && *c != '_').flat_map(char::to_lowercase).collect();
+    n.starts_with("lastresort")
+}
+
 /// Every face on the machine that draws at least one wanted character.
 fn candidates(wanted: &[char]) -> Vec<(fontdb::ID, Cand)> {
     let db = db();
     let mut out = Vec::new();
     for (key, info) in db.faces().take(MAX_FACES).enumerate() {
         let id = info.id;
+        if is_placeholder(&info.post_script_name) || info.families.iter().any(|f| is_placeholder(&f.0)) {
+            continue;
+        }
         let probe = catch_unwind(AssertUnwindSafe(|| {
             db.with_face_data(id, |data, index| {
                 if data.len() > MAX_FONT_BYTES {
@@ -385,6 +395,18 @@ mod tests {
         assert!(pick(&c, "漢", SANS).is_empty());
         let skip: HashSet<usize> = [0].into();
         assert_eq!(choose(&c, &['α'], SANS, 6, &skip), vec![1]);
+    }
+
+    #[test]
+    fn placeholder_faces_are_skipped_so_the_character_is_missing() {
+        for n in ["LastResort", "Last Resort", "LastResort-Regular", "last-resort"] {
+            assert!(is_placeholder(n), "{n}");
+        }
+        assert!(!is_placeholder("Geist") && !is_placeholder("Hiragino Sans"));
+        // A mock machine: the placeholder claims every character, so only filtering keeps it out.
+        let faces = [("Last Resort", cand(0, "\u{10fffd}漢"))];
+        let pool: Vec<Cand> = faces.into_iter().filter(|(n, _)| !is_placeholder(n)).map(|(_, c)| c).collect();
+        assert!(pick(&pool, "\u{10fffd}", SANS).is_empty());
     }
 
     #[test]
