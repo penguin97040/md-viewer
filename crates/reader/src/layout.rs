@@ -523,7 +523,7 @@ fn layout_impl(c: &ChunkContent, o: &Options, palette: Palette, print: bool, st:
     if first {
         l.y += o.padding;
     }
-    l.blocks(&c.blocks, ctx, first, false);
+    l.blocks(&c.blocks, ctx, first || c.joined_before, c.joined_after);
     // `.chunk` is a flow root: its children's margins stay inside it.
     l.flush();
     if last {
@@ -1843,7 +1843,9 @@ impl Layouter<'_> {
                 let ty = y + 1.0 + pad_y + (row_h - h) / 2.0;
                 let (tb, _) = self.place(cell.prep, &lines, cell.ctx, x + 1.0 + pad_x, ty, inner, true);
                 self.push_box(tb);
-                if is_head && !t.rows.is_empty() {
+                // A table cut into parts cannot be sorted as one, so its header offers no sort.
+                let cut = self.c.joined_after && matches!(self.c.blocks.last(), Some(Block::Table(last)) if std::ptr::eq(last, t));
+                if is_head && !t.rows.is_empty() && !cut {
                     let layer = self.layer as u32;
                     self.out.hits.push(Hit { rect: Rect::new(x, y, w, full_row), kind: HitKind::Sort { key, col }, layer, underline: None });
                 }
@@ -2414,6 +2416,17 @@ mod tests {
             at = line.byte1;
         }
         assert_eq!(at as usize, c.text.len());
+    }
+
+    #[test]
+    fn parts_of_one_paragraph_meet_with_no_gap() {
+        let d = crate::doc::Document::parse("plain word ".repeat(1 << 18).into_bytes());
+        assert!(d.chunks.len() > 2);
+        let (a, b) = (d.chunk(0), d.chunk(1));
+        let (la, lb) = (layout_chunk(&a, &OPTS, &ChunkState::default(), true, false, &mut Fake, &NoAssets), layout_chunk(&b, &OPTS, &ChunkState::default(), false, false, &mut Fake, &NoAssets));
+        let last = la.layers[0].boxes[0].rect.bottom();
+        assert!((la.height - last).abs() < 1.0, "{} {last}", la.height);
+        assert!(lb.layers[0].boxes[0].rect.y.abs() < 1.0, "{}", lb.layers[0].boxes[0].rect.y);
     }
 
     #[test]
