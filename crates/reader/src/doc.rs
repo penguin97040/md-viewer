@@ -72,17 +72,32 @@ fn next_id() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+/// An I/O error in plain words, as 0.2.6 showed them: the system's own message without Rust's
+/// "(os error N)" tail, and in lower case on Unix, where Go's messages are.
+pub fn plain_io_error(e: &std::io::Error) -> String {
+    let full = e.to_string();
+    let msg = match full.rfind(" (os error ") {
+        Some(i) if full.ends_with(')') => &full[..i],
+        _ => &full,
+    };
+    if cfg!(unix) {
+        let mut c = msg.chars();
+        return c.next().map_or_else(String::new, |f| f.to_lowercase().chain(c).collect());
+    }
+    msg.to_string()
+}
+
 impl Document {
     /// Reads and parses a file, refusing anything but a regular file of a sensible size.
     pub fn load(path: &Path) -> Result<Self, String> {
-        let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+        let meta = std::fs::metadata(path).map_err(|e| plain_io_error(&e))?;
         if !meta.is_file() {
             return Err("That is not a file".into());
         }
         if meta.len() > MAX_FILE_BYTES {
             return Err(format!("the file is larger than {} MB", MAX_FILE_BYTES >> 20));
         }
-        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+        let bytes = std::fs::read(path).map_err(|e| plain_io_error(&e))?;
         if bytes.len() as u64 > MAX_FILE_BYTES {
             return Err(format!("the file is larger than {} MB", MAX_FILE_BYTES >> 20));
         }
@@ -383,6 +398,14 @@ fn normalise_newlines(bytes: Vec<u8>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn io_errors_are_plain() {
+        let Err(e) = Document::load(std::path::Path::new("/definitely/not/here.md")) else { panic!("loaded") };
+        assert!(!e.contains("os error"), "{e}");
+        #[cfg(unix)]
+        assert_eq!(e, "no such file or directory");
+    }
+
     use super::*;
     use std::fmt::Write;
 

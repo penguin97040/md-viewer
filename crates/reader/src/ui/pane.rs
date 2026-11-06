@@ -153,12 +153,17 @@ pub struct ReaderView {
     /// Chunk -> keys of maths and diagrams its layout was waiting for.
     waiting: HashMap<usize, Vec<u64>>,
     watching: bool,
+    /// Callbacks of loads still in flight. The newest load answers all of them, so an open that a
+    /// reload overtakes still hears whether the file could be read.
+    load_waiters: Vec<LoadDone>,
     prefetching: Option<usize>,
     prefetch_queue_gen: u64,
     last_heading: Option<usize>,
     pub perf: Perf,
     pub assets: Option<Arc<dyn Assets + Send + Sync>>,
 }
+
+type LoadDone = Box<dyn FnOnce(&mut ReaderView, Result<(), String>, &mut Context<ReaderView>)>;
 
 impl EventEmitter<ReaderEvent> for ReaderView {}
 
@@ -246,6 +251,7 @@ impl ReaderView {
             content_scale: 1.0,
             waiting: HashMap::new(),
             watching: false,
+            load_waiters: Vec::new(),
             prefetching: None,
             prefetch_queue_gen: 0,
             last_heading: None,
@@ -269,6 +275,7 @@ impl ReaderView {
         self.perf.opened_at = Some(Instant::now());
         self.load_gen += 1;
         let gen = self.load_gen;
+        self.load_waiters.push(Box::new(done));
         // On Windows these tasks run in an `extern "system"` thread pool callback, where a panic
         // aborts the process and so closes every window. See also the prefetch and search tasks.
         let task = cx.background_spawn(async move {
@@ -287,10 +294,16 @@ impl ReaderView {
                         } else {
                             this.show(Arc::new(d));
                         }
-                        done(this, Ok(()), cx);
+                        for done in std::mem::take(&mut this.load_waiters) {
+                            done(this, Ok(()), cx);
+                        }
                         cx.notify();
                     }
-                    Err(e) => done(this, Err(e), cx),
+                    Err(e) => {
+                        for done in std::mem::take(&mut this.load_waiters) {
+                            done(this, Err(e.clone()), cx);
+                        }
+                    }
                 }
             });
         })
