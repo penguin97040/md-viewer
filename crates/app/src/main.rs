@@ -76,7 +76,8 @@ fn main() {
         let _ = open_tx.try_send(urls);
     });
     app.run(move |cx: &mut App| {
-        // Greyscale text: far easier to read in dark mode on a QD-OLED panel.
+        // Greyscale text: subpixel (colour-fringed) text looks worse on light-on-dark, and on displays whose
+        // pixels are not RGB stripes.
         cx.set_text_rendering_mode(gpui::TextRenderingMode::Grayscale);
         cx.text_system()
             .add_fonts(vec![

@@ -153,7 +153,7 @@ pub fn scheme(u: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// `TestReachable` from `internal/store/store_test.go`, with the document on a share.
+    /// v0.2's `TestReachable`, with the document on a share.
     #[test]
     fn reachable_table() {
         let doc = r"\\nas\docs\readme.md";
@@ -207,7 +207,7 @@ mod tests {
         }
     }
 
-    /// `TestIsWebURL` from `internal/doc/security_test.go`.
+    /// v0.2's `TestIsWebURL`.
     #[test]
     fn web_url_table() {
         for (u, want) in [

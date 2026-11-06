@@ -1,4 +1,4 @@
-//! Placement of a detached window. Same rule as `native_linux.go` `compute_placement`: default
+//! Placement of a detached window. Same rule as v0.2: default
 //! 1100x820, clamped to the work area, with the drop point 80 px in and 20 px down so the pointer
 //! lands on the new window's header.
 

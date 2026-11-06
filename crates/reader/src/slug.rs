@@ -1,4 +1,4 @@
-//! GitHub-style heading ids. Port of `internal/doc/slug.go`.
+//! GitHub-style heading ids. Port of v0.2's slug code.
 
 use std::collections::{HashMap, HashSet};
 use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};
@@ -70,7 +70,7 @@ mod tests {
         assert_eq!(s.slug("mine"), "mine-1");
     }
 
-    /// MISTAKES 2: repeats must not rescan from 1.
+    /// Repeats must not rescan from 1.
     #[test]
     fn many_repeats_stay_fast() {
         let mut s = Slugger::new();

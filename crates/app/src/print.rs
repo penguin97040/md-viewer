@@ -159,7 +159,7 @@ impl AppView {
         }
         match job.state() {
             PrintState::Running { fraction } => {
-                // Only the text changes; the Cancel link keeps its identity (MISTAKES 12).
+                // Only the text changes; the Cancel link keeps its identity.
                 self.toast = Some((format!("Preparing PDF… {}%", (fraction * 100.0).round() as u32), true));
                 cx.notify();
                 true

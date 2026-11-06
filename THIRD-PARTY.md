@@ -202,6 +202,7 @@ current. `cargo deny check licenses` enforces which licences may appear (see `de
 | foreign-types-shared | 0.3.1 | MIT/Apache-2.0 |
 | form_urlencoded | 1.2.2 | MIT OR Apache-2.0 |
 | freetype-sys | 0.20.1 | MIT |
+| fsevent-sys | 4.1.0 | MIT |
 | futures | 0.3.34 | MIT OR Apache-2.0 |
 | futures-channel | 0.3.34 | MIT OR Apache-2.0 |
 | futures-core | 0.3.34 | MIT OR Apache-2.0 |
@@ -255,6 +256,7 @@ current. `cargo deny check licenses` enforces which licences may appear (see `de
 | htmlize | 1.1.0 | MIT OR Apache-2.0 |
 | http | 1.5.0 | MIT OR Apache-2.0 |
 | http-body | 1.1.0 | MIT |
+| httparse | 1.10.1 | MIT OR Apache-2.0 |
 | hybrid-array | 0.4.15 | MIT OR Apache-2.0 |
 | iana-time-zone | 0.1.65 | MIT OR Apache-2.0 |
 | icu_collections | 2.4.0 | Unicode-3.0 |
@@ -275,6 +277,8 @@ current. `cargo deny check licenses` enforces which licences may appear (see `de
 | imagesize | 0.14.0 | MIT |
 | imgref | 1.12.3 | CC0-1.0 OR Apache-2.0 |
 | indexmap | 2.14.2 | Apache-2.0 OR MIT |
+| inotify | 0.11.5 | ISC |
+| inotify-sys | 0.1.8 | ISC |
 | inout | 0.1.4 | MIT OR Apache-2.0 |
 | inventory | 0.3.25 | MIT OR Apache-2.0 |
 | is-docker | 0.2.0 | MIT |
@@ -313,7 +317,6 @@ current. `cargo deny check licenses` enforces which licences may appear (see `de
 | md-5 | 0.10.6 | MIT OR Apache-2.0 |
 | memchr | 2.8.3 | Unlicense OR MIT |
 | memmap2 | 0.9.12 | MIT OR Apache-2.0 |
-| mermaid-rs-renderer | 0.3.1 | MIT |
 | merman | 0.10.0-alpha.1 | MIT OR Apache-2.0 |
 | merman-analysis | 0.10.0-alpha.1 | MIT OR Apache-2.0 |
 | merman-ascii | 0.10.0-alpha.1 | MIT OR Apache-2.0 |
@@ -329,6 +332,7 @@ current. `cargo deny check licenses` enforces which licences may appear (see `de
 | mime_guess | 2.0.5 | MIT |
 | miniz_oxide | 0.8.9 | MIT OR Zlib OR Apache-2.0 |
 | miniz_oxide | 0.9.1 | MIT OR Zlib OR Apache-2.0 |
+| mio | 1.2.4 | MIT |
 | moxcms | 0.8.1 | BSD-3-Clause OR Apache-2.0 |
 | multiversion_no_op | 1.0.0 | Apache-2.0 OR MIT |
 | naga | 30.0.1 | MIT OR Apache-2.0 |
@@ -337,7 +341,9 @@ current. `cargo deny check licenses` enforces which licences may appear (see `de
 | no_std_io2 | 0.9.4 | Apache-2.0 OR MIT |
 | nom | 8.0.0 | MIT |
 | noop_proc_macro | 0.3.0 | MIT |
+| notify | 8.2.0 | CC0-1.0 |
 | notify-rust | 4.18.2 | MIT OR Apache-2.0 |
+| notify-types | 2.2.0 | MIT OR Apache-2.0 |
 | ntapi | 0.4.3 | Apache-2.0 OR MIT |
 | num | 0.4.3 | MIT OR Apache-2.0 |
 | num-bigint | 0.4.8 | MIT OR Apache-2.0 |
@@ -467,6 +473,7 @@ current. `cargo deny check licenses` enforces which licences may appear (see `de
 | resvg | 0.46.0 | Apache-2.0 OR MIT |
 | resvg | 0.47.0 | Apache-2.0 OR MIT |
 | rgb | 0.8.53 | MIT |
+| ring | 0.17.14 | Apache-2.0 AND ISC |
 | roughr-merman | 0.12.5 | MIT |
 | roxmltree | 0.20.0 | MIT OR Apache-2.0 |
 | roxmltree | 0.21.2 | MIT OR Apache-2.0 |
@@ -477,6 +484,9 @@ current. `cargo deny check licenses` enforces which licences may appear (see `de
 | rustc-hash | 1.1.0 | Apache-2.0/MIT |
 | rustc-hash | 2.1.3 | Apache-2.0 OR MIT |
 | rustix | 1.1.6 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
+| rustls | 0.23.46 | Apache-2.0 OR ISC OR MIT |
+| rustls-pki-types | 1.15.1 | MIT OR Apache-2.0 |
+| rustls-webpki | 0.103.16 | ISC |
 | rustybuzz | 0.20.1 | MIT |
 | ryu | 1.0.23 | Apache-2.0 OR BSL-1.0 |
 | ryu-js | 1.0.3 | Apache-2.0 OR BSL-1.0 |
@@ -572,9 +582,13 @@ current. `cargo deny check licenses` enforces which licences may appear (see `de
 | unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 |
 | unicode-vo | 0.1.0 | MIT/Apache-2.0 |
 | unicode-width | 0.2.3 | MIT OR Apache-2.0 |
+| untrusted | 0.9.0 | ISC |
+| ureq | 3.5.1 | MIT OR Apache-2.0 |
+| ureq-proto | 0.7.1 | MIT OR Apache-2.0 |
 | url | 2.5.8 | MIT OR Apache-2.0 |
 | usvg | 0.46.0 | Apache-2.0 OR MIT |
 | usvg | 0.47.0 | Apache-2.0 OR MIT |
+| utf8-zero | 0.8.1 | MIT OR Apache-2.0 |
 | utf8_iter | 1.1.0 | Apache-2.0 OR MIT |
 | utf_types | 1.0.0 | Apache-2.0 OR MIT |
 | uuid | 1.29.0 | Apache-2.0 OR MIT |
@@ -595,6 +609,7 @@ current. `cargo deny check licenses` enforces which licences may appear (see `de
 | wayland-sys | 0.31.11 | MIT |
 | web-time | 1.1.0 | MIT OR Apache-2.0 |
 | web_atoms | 0.3.0 | MIT OR Apache-2.0 |
+| webpki-roots | 1.0.11 | CDLA-Permissive-2.0 |
 | weezl | 0.1.12 | MIT OR Apache-2.0 |
 | wgpu | 30.0.1 | MIT OR Apache-2.0 |
 | wgpu-core | 30.0.1 | MIT OR Apache-2.0 |
@@ -630,11 +645,14 @@ current. `cargo deny check licenses` enforces which licences may appear (see `de
 | windows-result | 0.4.1 | MIT OR Apache-2.0 |
 | windows-strings | 0.4.2 | MIT OR Apache-2.0 |
 | windows-strings | 0.5.1 | MIT OR Apache-2.0 |
+| windows-sys | 0.60.2 | MIT OR Apache-2.0 |
 | windows-sys | 0.61.2 | MIT OR Apache-2.0 |
 | windows-targets | 0.52.6 | MIT OR Apache-2.0 |
+| windows-targets | 0.53.5 | MIT OR Apache-2.0 |
 | windows-threading | 0.1.0 | MIT OR Apache-2.0 |
 | windows-threading | 0.2.1 | MIT OR Apache-2.0 |
 | windows_x86_64_msvc | 0.52.6 | MIT OR Apache-2.0 |
+| windows_x86_64_msvc | 0.53.1 | MIT OR Apache-2.0 |
 | winnow | 1.0.4 | MIT |
 | write-fonts | 0.48.1 | MIT OR Apache-2.0 |
 | writeable | 0.6.4 | Unicode-3.0 |

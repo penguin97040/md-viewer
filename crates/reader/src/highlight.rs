@@ -1,5 +1,5 @@
 //! Syntax highlighting with syntect, mapped onto the chroma token classes the web reader's colours
-//! are defined on. Same limits as `render.go`: 256 KB per block and a 1 s budget.
+//! are defined on. Same limits as v0.2: 256 KB per block and a 1 s budget.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

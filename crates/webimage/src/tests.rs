@@ -1,4 +1,4 @@
-//! A port of `internal/webimage/webimage_test.go`, plus the limits the Go client got from `net/http`.
+//! A port of v0.2's web image tests, plus the limits the Go client got from `net/http`.
 
 use super::*;
 use std::io::Write;

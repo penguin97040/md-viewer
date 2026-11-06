@@ -8,7 +8,7 @@
 //! - [`single_instance`]: later launches hand their paths to the first process, and exit.
 //! - [`native`]: what GPUI does not expose, namely the pointer position on the desktop, which
 //!   window is really on top there, and the work area. Linux/X11 has been run. Windows code is
-//!   compile-only until the owner runs the checklist. Wayland and macOS report no native route.
+//!   compile-only until it has been run on a Windows machine. Wayland and macOS report no native route.
 
 pub mod drag;
 pub mod native;

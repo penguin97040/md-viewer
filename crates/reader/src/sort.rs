@@ -1,4 +1,4 @@
-//! Table sorting rules, ported from `frontend/extras.js`.
+//! Table sorting rules, ported from v0.2.
 
 use std::cmp::Ordering;
 use std::sync::OnceLock;

@@ -1,5 +1,5 @@
 //! Markdown to document model. Events from pulldown-cmark drive a small builder; raw HTML is
-//! mapped through `html.rs`. Chosen behaviour follows `internal/doc`: what the web reader shows
+//! mapped through `html.rs`. Chosen behaviour follows v0.2: what the web reader shows
 //! after goldmark and the sanitiser is the specification.
 
 use std::collections::HashMap;
