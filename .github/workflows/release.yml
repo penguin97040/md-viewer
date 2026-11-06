@@ -79,8 +79,10 @@ jobs:
           # Fails the build if the shaders would be compiled when the app starts.
           MDV_REQUIRE_PRECOMPILED_SHADERS: "1"
         run: |
+          # The shader build step writes its distinct blob count here for the check below.
+          export MDV_SHADER_REPORT="$GITHUB_WORKSPACE/shader-report.txt"
           cargo build --release --locked --target x86_64-pc-windows-msvc -p md-viewer --features precompiled-shaders
-          bash scripts/check-release-binary.sh windows target/x86_64-pc-windows-msvc/release/md-viewer.exe
+          bash scripts/check-release-binary.sh windows target/x86_64-pc-windows-msvc/release/md-viewer.exe "$MDV_SHADER_REPORT"
 
       - name: Build (Linux)
         if: matrix.name == 'linux'

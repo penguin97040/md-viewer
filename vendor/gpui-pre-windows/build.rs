@@ -53,6 +53,9 @@ mod shader_compilation {
         process::{self, Command},
     };
 
+    /// Every blob generated so far, to count the distinct ones at the end.
+    static BLOBS: std::sync::Mutex<Vec<Vec<u8>>> = std::sync::Mutex::new(Vec::new());
+
     pub fn compile_shaders() {
         let shader_path =
             PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("src/shaders.hlsl");
@@ -100,6 +103,18 @@ mod shader_compilation {
                 shader_path.to_str().unwrap(),
                 &rust_binding_path,
             );
+        }
+
+        // Entry points whose bodies are identical (`subpixel_sprite_vertex` only calls
+        // `monochrome_sprite_vertex`) give identical bytecode, which the linker folds into one
+        // constant. `MDV_SHADER_REPORT` names a file that receives the distinct count, for
+        // `scripts/check-release-binary.sh` to compare against the executable.
+        println!("cargo:rerun-if-env-changed=MDV_SHADER_REPORT");
+        if let Some(report) = std::env::var_os("MDV_SHADER_REPORT").filter(|v| !v.is_empty()) {
+            let mut blobs = BLOBS.lock().unwrap().clone();
+            blobs.sort();
+            blobs.dedup();
+            fs::write(report, format!("{}\n", blobs.len())).expect("Failed to write shader report");
         }
     }
 
@@ -259,6 +274,19 @@ mod shader_compilation {
             let equal = global_var.find('=').unwrap();
             global_var[equal + 1..].trim()
         };
+        let bytes: Vec<u8> = const_definition
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter_map(|t| t.strip_prefix("0x"))
+            .filter_map(|t| u8::from_str_radix(t, 16).ok())
+            .collect();
+        if bytes.len() < 32 || !bytes.starts_with(b"DXBC") {
+            println!(
+                "cargo::error=Shader {const_name} compiled to {} bytes that are not a DXBC blob",
+                bytes.len()
+            );
+            process::exit(1);
+        }
+        BLOBS.lock().unwrap().push(bytes);
         let rust_binding = format!(
             "const {}: &[u8] = &{}\n",
             const_name,
