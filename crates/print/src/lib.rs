@@ -18,6 +18,7 @@ pub mod handoff;
 mod job;
 mod paginate;
 mod shape;
+mod system;
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -182,25 +183,38 @@ pub fn render_pdf(doc: &Document, opts: &PrintOptions, ctl: &mut dyn FnMut(Progr
 fn render_inner(doc: &Document, opts: &PrintOptions, ctl: &mut dyn FnMut(Progress) -> bool) -> Result<(Vec<u8>, Report), PrintError> {
     let geo = Geometry::new(opts.page);
     let lo = layout_options(&geo, opts);
-    let fonts = fonts::FontSet::new();
+    let mut fonts = fonts::FontSet::new();
     let store = RefCell::new(assets::Store::default());
     let n = doc.chunks.len();
     let mut report = Report { chunks: n, ..Default::default() };
 
-    // Pass one: where the pages break.
-    let mut plan = paginate::Plan::new(geo.content_h_px);
-    let mut shaper = shape::PdfShaper::new(&fonts);
-    for i in 0..n {
-        if !ctl(Progress { phase: Phase::Layout, done: i, total: n }) {
-            return Err(PrintError::Cancelled);
+    // Pass one: where the pages break. If the embedded fonts lack characters the document uses,
+    // look for system fonts that have them, and lay out again with those added.
+    let mut tries = 0;
+    let (plan, shaper) = loop {
+        let mut plan = paginate::Plan::new(geo.content_h_px);
+        let mut shaper = shape::PdfShaper::new(&fonts);
+        for i in 0..n {
+            if !ctl(Progress { phase: Phase::Layout, done: i, total: n }) {
+                return Err(PrintError::Cancelled);
+            }
+            let c = doc.chunk(i);
+            let a = assets::PrintAssets { store: &store, document: doc.path.as_deref(), web_images: opts.web_images };
+            let l = lay(&c, &lo, i == 0, i + 1 == n, &mut shaper, &a);
+            plan.add_chunk(i, &c, &l);
         }
-        let c = doc.chunk(i);
-        let a = assets::PrintAssets { store: &store, document: doc.path.as_deref(), web_images: opts.web_images };
-        let l = lay(&c, &lo, i == 0, i + 1 == n, &mut shaper, &a);
-        plan.add_chunk(i, &c, &l);
-    }
-    report.missing_glyphs = shaper.missing;
-    report.missing_sample = shaper.missing_sample;
+        tries += 1;
+        let more = if tries == 1 && !shaper.missing_chars.is_empty() { fonts.with_system_for(&shaper.missing_chars) } else { None };
+        match more {
+            Some(f) => {
+                drop(shaper);
+                fonts = f;
+            }
+            None => break (plan, (shaper.missing, shaper.missing_sample)),
+        }
+    };
+    report.missing_glyphs = shaper.0;
+    report.missing_sample = shaper.1;
     let plan = plan.finish();
     report.pages = plan.pages.len();
 
@@ -246,6 +260,21 @@ mod tests {
         let (b, r) = render_pdf(&doc, &PrintOptions::default(), &mut |_| true).expect("render");
         assert!(b.starts_with(b"%PDF-"), "not a PDF");
         (b, r)
+    }
+
+    /// With system fonts the characters the embedded fonts lack are drawn and copy out correctly;
+    /// the ones nothing draws are still counted so the person is told.
+    #[test]
+    fn system_fonts_fill_in_and_the_rest_is_still_reported() {
+        let (_, plain) = pdf("plain text only\n");
+        assert_eq!(plain.missing_glyphs, 0);
+        let (bytes, r) = pdf("alpha \u{3b1}\u{3b2} kanji \u{6f22}\u{5b57} gone \u{10fffd}\n");
+        assert!(r.missing_glyphs >= 1 && r.missing_sample.contains(&'\u{10fffd}'), "{r:?}");
+        let drawn = r.missing_glyphs == 1;
+        if cfg!(any(windows, target_os = "macos")) {
+            assert!(drawn, "Greek and CJK should come from the system fonts: {r:?}");
+        }
+        assert!(bytes.len() > 1000);
     }
 
     fn luminance(c: u32) -> f32 {

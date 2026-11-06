@@ -15,6 +15,7 @@ krilla-svg.workspace = true
 rustybuzz.workspace = true
 unicode-segmentation.workspace = true
 usvg.workspace = true
+fontdb.workspace = true
 image.workspace = true
 
 [[example]]

@@ -9,6 +9,8 @@ use crate::fonts::FontSet;
 
 /// How many different undrawable characters are remembered to name to the person.
 const MISSING_SAMPLE: usize = 12;
+/// How many different undrawable characters are collected to look for in system fonts.
+const MISSING_CHARS: usize = 256;
 
 pub struct PdfShaper<'a> {
     pub fonts: &'a FontSet,
@@ -16,15 +18,23 @@ pub struct PdfShaper<'a> {
     pub missing: usize,
     /// The first few of them, each once.
     pub missing_sample: Vec<char>,
+    /// Every distinct character in them, up to [`MISSING_CHARS`], for looking up system fonts.
+    pub missing_chars: Vec<char>,
 }
 
 impl<'a> PdfShaper<'a> {
     pub fn new(fonts: &'a FontSet) -> Self {
-        Self { fonts, missing: 0, missing_sample: Vec::new() }
+        Self { fonts, missing: 0, missing_sample: Vec::new(), missing_chars: Vec::new() }
     }
 
     fn note_missing(&mut self, cluster: &str) {
         self.missing += 1;
+        let fonts = self.fonts;
+        for c in cluster.chars().filter(|c| !ignorable(*c) && !fonts.has_any(*c)) {
+            if self.missing_chars.len() < MISSING_CHARS && !self.missing_chars.contains(&c) {
+                self.missing_chars.push(c);
+            }
+        }
         if let Some(c) = cluster.chars().find(|c| !ignorable(*c)) {
             if self.missing_sample.len() < MISSING_SAMPLE && !self.missing_sample.contains(&c) {
                 self.missing_sample.push(c);
@@ -60,8 +70,8 @@ impl Shaper for PdfShaper<'_> {
         if text.is_empty() {
             return 0.0;
         }
-        let chain = self.fonts.chain(spec);
         let fonts = self.fonts;
+        let chain = fonts.chain(spec);
         let has = |ix: usize, c: char| ignorable(c) || fonts.fonts[ix].face.glyph_index(c).is_some();
         // The usual case, and the only one where shaping across the whole text is certain to work.
         if text.chars().all(|c| has(chain[0], c)) {

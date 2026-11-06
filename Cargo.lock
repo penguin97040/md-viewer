@@ -3418,6 +3418,7 @@ dependencies = [
 name = "mdv-print"
 version = "0.0.0"
 dependencies = [
+ "fontdb",
  "image",
  "krilla",
  "krilla-svg",

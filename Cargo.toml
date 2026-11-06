@@ -45,6 +45,7 @@ merman = { version = "=0.10.0-alpha.1", default-features = false, features = ["s
 merman-export = { version = "=0.10.0-alpha.1", default-features = false, features = ["native-fonts"] }
 resvg = { version = "=0.47.0", default-features = false, features = ["text"] }
 usvg = { version = "=0.47.0", default-features = false, features = ["text"] }
+fontdb = { version = "=0.23.0", default-features = false, features = ["fs", "memmap", "fontconfig"] }
 roxmltree = "=0.21.2"
 krilla = { version = "=0.8.2", default-features = false, features = ["raster-images"] }
 krilla-svg = "=0.8.1"

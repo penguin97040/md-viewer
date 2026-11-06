@@ -51,7 +51,7 @@ impl<'a> Pdf<'a> {
         let mut fonts = Vec::new();
         for f in &set.fonts {
             let data: &'static [u8] = f.data;
-            fonts.push(Font::new(data.into(), 0).ok_or_else(|| PrintError::Pdf(format!("font {} could not be read", f.name)))?);
+            fonts.push(Font::new(data.into(), f.index).ok_or_else(|| PrintError::Pdf(format!("font {} could not be read", f.name)))?);
         }
         let mut db = usvg::fontdb::Database::new();
         // Diagram text falls back among these, as text in the page does.
