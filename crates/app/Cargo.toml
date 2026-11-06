@@ -6,6 +6,10 @@ publish.workspace = true
 
 build = "build.rs"
 
+[features]
+# Test switches read from the environment. Never in a build anyone is given.
+dev-harness = ["mdv-reader/dev-harness"]
+
 [dependencies]
 gpui.workspace = true
 anyhow.workspace = true

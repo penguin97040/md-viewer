@@ -1045,19 +1045,17 @@ impl Layouter<'_> {
             }
         };
         match self.assets.image(&img.source) {
-            ImageState::Ready { width, height, key } if !matches!(img.source, ImageSource::Web(_)) => {
+            ImageState::Ready { width, height, key } => {
                 // `max-width: 100%; height: auto`: a width attribute sets the box, the height
                 // follows the image's own proportions.
                 let w = img.width.unwrap_or(width).min(st.max_w).max(1.0);
                 let h = if width > 0.0 { w * height / width } else { height };
-                out.push(Run::Atom(AtomDraw::Image { key, w, h }, h, 0.0, self.text_at.get()));
+                out.push(Run::Atom(AtomDraw::Image { key, w, h }, h, 0.0, img.alt_text.map_or(self.text_at.get(), |a| a.start)));
             }
-            ImageState::Pending if !matches!(img.source, ImageSource::Web(_)) => {
+            ImageState::Pending => {
                 // Reserve what is known: the attributes, or nothing yet.
-                let w = img.width.unwrap_or(1.0).min(st.max_w);
                 let h = img.height.unwrap_or(1.0);
-                out.push(Run::Atom(AtomDraw::EmptyBox { w: 0.0, h: 0.0 }, h, 0.0, self.text_at.get()));
-                let _ = w;
+                out.push(Run::Atom(AtomDraw::EmptyBox { w: 0.0, h: 0.0 }, h, 0.0, img.alt_text.map_or(self.text_at.get(), |a| a.start)));
             }
             ImageState::Failed if !matches!(img.source, ImageSource::Web(_)) && !img.alt.is_empty() => {
                 // A browser shows a broken-image icon and the alt text. Here: the alt text in
@@ -2618,6 +2616,22 @@ mod image_box_tests {
         fn image(&self, _s: &ImageSource) -> ImageState {
             ImageState::Ready { width: 400.0, height: 400.0, key: 1 }
         }
+    }
+
+    /// Once a web image loads, its alt text has no box, but a find match in it must still have a
+    /// place to scroll to.
+    #[test]
+    fn a_loaded_web_image_still_places_its_alt_text() {
+        let o = Options { width: 800.0, padding: 20.0, font_size: 20.0, line_height: 1.5, serif: false, wrap: true, mode: Mode::Dark };
+        let w = parse_whole("One\n\n![label](https://example.com/x.png)\n\n## Next\n", 1 << 30, false);
+        let c = &w.chunks[0];
+        let l = layout_chunk(c, &o, &ChunkState::default(), true, true, &mut Fake, &Big);
+        let held = layout_chunk(c, &o, &ChunkState::default(), true, true, &mut Fake, &NoAssets);
+        assert!(l.height > held.height + 300.0, "the image takes its place: {} {}", l.height, held.height);
+        let next = c.anchors.iter().find(|a| a.id == "next").unwrap().offset;
+        assert!(l.y_of(next).unwrap() > 400.0);
+        let alt = next - "Next".len() as u32 - 2;
+        assert!(l.y_of(alt).is_some());
     }
 
     /// An image alone has no text: a jump to the heading after it must land on the heading.

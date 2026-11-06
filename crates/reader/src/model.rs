@@ -214,7 +214,8 @@ pub enum LinkTarget {
 pub struct Image {
     pub source: ImageSource,
     pub alt: String,
-    /// The alt text in the flat text, only when it is what the reader sees (a held web image).
+    /// The alt text in the flat text, only for a web image, where it is what the reader sees while
+    /// the image is held or if it can't be loaded.
     pub alt_text: Option<ByteSpan>,
     pub title: Option<String>,
     /// `width` and `height` attributes from raw HTML, in CSS px.
@@ -228,7 +229,7 @@ pub enum ImageSource {
     Local(String),
     /// A base64 `data:image/...` URI.
     Data(String),
-    /// On another computer. Never fetched by the reader: it shows the alt text in a dashed box.
+    /// On another computer. Its alt text shows in a dashed box until the reader agrees to load it.
     Web(String),
 }
 

@@ -109,6 +109,7 @@ impl AppView {
         }
         // The tab or file may have changed while the dialog was open.
         let same_tab = self.reader().is_some_and(|r| r == run.reader);
+        let web_images = run.reader.read(cx).web_images_allowed();
         let doc = run.reader.read(cx).doc.clone().filter(|d| d.id == doc_id);
         let (true, Some(doc)) = (same_tab, doc) else {
             self.print = None;
@@ -117,7 +118,7 @@ impl AppView {
         };
         let s = self.reader_settings();
         let title = self.tabs.get(self.active).map(|t| t.name.to_string());
-        let job = PrintJob::start(doc, PrintOptions { serif: s.serif, line_height: s.line_height, title, ..Default::default() }, dest);
+        let job = PrintJob::start(doc, PrintOptions { serif: s.serif, line_height: s.line_height, title, web_images, ..Default::default() }, dest);
         if let Some(r) = self.print.as_mut() {
             r.job = Some(job);
         }

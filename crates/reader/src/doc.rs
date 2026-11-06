@@ -189,7 +189,7 @@ impl Document {
                     return c;
                 }
                 let content = Arc::new(self.parse_chunk(i, true));
-                let mut g = cache.lock().expect("cache");
+                let mut g = crate::locked(cache);
                 g.clock += 1;
                 g.parses += 1;
                 let clock = g.clock;
@@ -209,7 +209,7 @@ impl Document {
         match &self.mode {
             Mode::Whole(c) => Some(c[i].clone()),
             Mode::Sections(cache) => {
-                let mut g = cache.lock().expect("cache");
+                let mut g = crate::locked(cache);
                 g.clock += 1;
                 let clock = g.clock;
                 g.map.get_mut(&(i as u32)).map(|e| {
@@ -223,14 +223,14 @@ impl Document {
     pub fn cached_count(&self) -> usize {
         match &self.mode {
             Mode::Whole(c) => c.len(),
-            Mode::Sections(cache) => cache.lock().expect("cache").map.len(),
+            Mode::Sections(cache) => crate::locked(cache).map.len(),
         }
     }
 
     pub fn parse_count(&self) -> u64 {
         match &self.mode {
             Mode::Whole(_) => 0,
-            Mode::Sections(cache) => cache.lock().expect("cache").parses,
+            Mode::Sections(cache) => crate::locked(cache).parses,
         }
     }
 
@@ -251,7 +251,7 @@ impl Document {
                     folded.into_boxed_str()
                 })
                 .collect();
-            *self.index_time.lock().expect("time") = Some(t.elapsed());
+            *crate::locked(&self.index_time) = Some(t.elapsed());
             v
         })
     }

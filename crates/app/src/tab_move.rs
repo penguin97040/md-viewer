@@ -45,13 +45,12 @@ pub fn next_tab_id() -> TabId {
 pub struct TabState {
     pub current_heading: usize,
     pub toc_offset: Pixels,
-    pub web_bar: bool,
     pub opaque: Rc<dyn Any>,
 }
 
 impl Default for TabState {
     fn default() -> Self {
-        Self { current_heading: 0, toc_offset: px(0.0), web_bar: false, opaque: Rc::new(next_tab_id()) }
+        Self { current_heading: 0, toc_offset: px(0.0), opaque: Rc::new(next_tab_id()) }
     }
 }
 
@@ -1094,8 +1093,8 @@ fn windows_json(cx: &mut App) -> Vec<String> {
             .enumerate()
             .map(|(i, t)| {
                 format!(
-                    "{{\"reader_y\":{},\"id\":{},\"path\":\"{}\",\"heading\":{},\"toc_offset\":{},\"web_bar\":{},\"opaque\":\"{:?}\"}}",
-                    reader_y[i], t.id, t.path, t.state.current_heading, f32::from(t.state.toc_offset), t.state.web_bar, Rc::as_ptr(&t.state.opaque) as *const u8,
+                    "{{\"reader_y\":{},\"id\":{},\"path\":\"{}\",\"heading\":{},\"toc_offset\":{},\"opaque\":\"{:?}\"}}",
+                    reader_y[i], t.id, t.path, t.state.current_heading, f32::from(t.state.toc_offset), Rc::as_ptr(&t.state.opaque) as *const u8,
                 )
             })
             .collect();

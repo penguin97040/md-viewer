@@ -59,6 +59,7 @@ fn huge(n: usize) -> Vec<Heading> {
 }
 
 fn main() {
+    mdv_reader::ui::crash::install_hook(mdv_platform::show_fatal_error);
     timing::log("main_entered");
     let demo = std::env::var("MDV_DEMO").unwrap_or_default();
     let has = move |k: &str| demo.split(',').any(|d| d == k);

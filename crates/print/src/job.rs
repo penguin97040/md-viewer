@@ -36,7 +36,7 @@ impl PrintJob {
         let doc_id = doc.id;
         // Fail now, with a clear message, if the folder cannot be written, not after the long work.
         if let Err(e) = crate::handoff::probe(&dest) {
-            *result.lock().expect("lock") = Some(PrintState::Failed(crate::handoff::explain(&e, &dest)));
+            *mdv_reader::locked(&result) = Some(PrintState::Failed(crate::handoff::explain(&e, &dest)));
             return Self { cancel, fraction, result, doc_id };
         }
         let spawned = std::thread::Builder::new().name("mdv-print".into()).stack_size(64 << 20).spawn(move || {
@@ -58,10 +58,10 @@ impl PrintJob {
                 Err(PrintError::Cancelled) => PrintState::Cancelled,
                 Err(e) => PrintState::Failed(e.to_string()),
             };
-            *r2.lock().expect("lock") = Some(state);
+            *mdv_reader::locked(&r2) = Some(state);
         });
         if spawned.is_err() {
-            *result.lock().expect("lock") = Some(PrintState::Failed("could not start the print thread".into()));
+            *mdv_reader::locked(&result) = Some(PrintState::Failed("could not start the print thread".into()));
         }
         Self { cancel, fraction, result, doc_id }
     }
@@ -72,7 +72,7 @@ impl PrintJob {
 
     /// The current state; a finished state is returned once, then the job reads as cancelled.
     pub fn state(&self) -> PrintState {
-        let mut r = self.result.lock().expect("lock");
+        let mut r = mdv_reader::locked(&self.result);
         match r.take() {
             Some(s) => {
                 *r = Some(PrintState::Cancelled);

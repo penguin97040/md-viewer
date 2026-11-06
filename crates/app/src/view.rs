@@ -193,20 +193,18 @@ impl AppView {
 
     /// Copies the view's per-tab fields into the active tab, so they travel with it.
     fn save_active_state(&mut self) {
-        let (current, offset, web) = (self.current, self.toc_scroll.0.borrow().base_handle.offset().y, self.web_bar);
+        let (current, offset) = (self.current, self.toc_scroll.0.borrow().base_handle.offset().y);
         if let Some(tab) = self.tabs.get_mut(self.active) {
             tab.state.current_heading = current;
             tab.state.toc_offset = offset;
-            tab.state.web_bar = web;
         }
     }
 
     /// The reverse of `save_active_state`, after `active` changed.
     fn load_active_state(&mut self) {
-        let state = self.tabs.get(self.active).map(|t| (t.state.current_heading, t.state.toc_offset, t.state.web_bar));
-        let (current, offset, web) = state.unwrap_or((0, px(0.0), false));
+        let state = self.tabs.get(self.active).map(|t| (t.state.current_heading, t.state.toc_offset));
+        let (current, offset) = state.unwrap_or((0, px(0.0)));
         self.current = current;
-        self.web_bar = web;
         let handle = self.toc_scroll.0.borrow().base_handle.clone();
         let mut o = handle.offset();
         o.y = offset;
@@ -304,6 +302,7 @@ impl AppView {
         cx.subscribe(reader, |this, _, e: &ReaderEvent, cx| match e {
             ReaderEvent::OpenLocal { path, fragment } => this.open_path(path.clone(), fragment.clone(), cx),
             ReaderEvent::Toast(m) => this.show_toast(m, false, cx),
+            ReaderEvent::WebBar => cx.notify(),
         })
     }
 
@@ -1067,8 +1066,18 @@ impl AppView {
     fn web_bar(&mut self, vw: f32, cx: &mut Context<Self>) -> impl IntoElement {
         let p = *self.mode.palette();
         let hidden = self.toast.is_some();
-        let load = self.link("web-load", "Load images", cx, |t, _, _| t.web_bar = false);
-        let dismiss = self.icon_btn("web-close", "dismiss", "Dismiss", m::ICON_SMALL, m::ICON_SMALL, m::ICON_SMALL_SVG, false, cx, |t, _, _| t.web_bar = false);
+        let load = self.link("web-load", "Load images", cx, |t, _, cx| {
+            t.web_bar = false;
+            if let Some(r) = t.reader() {
+                r.update(cx, |r, cx| r.load_web_images(cx));
+            }
+        });
+        let dismiss = self.icon_btn("web-close", "dismiss", "Dismiss", m::ICON_SMALL, m::ICON_SMALL, m::ICON_SMALL_SVG, false, cx, |t, _, cx| {
+            t.web_bar = false;
+            if let Some(r) = t.reader() {
+                r.update(cx, |r, cx| r.dismiss_web_bar(cx));
+            }
+        });
         div()
             .absolute()
             .left_0()
@@ -1739,7 +1748,8 @@ impl Render for AppView {
         };
 
         let find = self.find_open.then(|| self.find_bar(vw, cx));
-        let web = self.web_bar.then(|| self.web_bar(vw, cx));
+        let wanted = self.web_bar || self.reader().is_some_and(|r| r.read(cx).web_bar_wanted());
+        let web = wanted.then(|| self.web_bar(vw, cx));
         let toast = self.toast_view(vw, cx);
         let settings = self.settings_open.then(|| self.settings_popover(vw, cx));
         let tools = (narrow && self.tools_open).then(|| self.tools_popup(cx));

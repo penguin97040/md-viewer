@@ -34,7 +34,7 @@ pub(crate) fn render(src: &str, opts: &DiagramOptions) -> Result<RenderedAsset, 
         card = true;
     }
     let ro = options(&opts, card);
-    guard::run(&guard::MERMAID_ABANDONED, limits::MERMAID_BUDGET, move || {
+    guard::run(&guard::MERMAID, limits::MERMAID_BUDGET, move || {
         #[cfg(feature = "merman")]
         let svg = {
             let _ = &ro;

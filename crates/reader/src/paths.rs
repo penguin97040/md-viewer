@@ -109,6 +109,14 @@ pub fn is_markdown(path: &str) -> bool {
     [".md", ".markdown", ".mdown", ".mkd", ".mkdn", ".mdx", ".txt"].iter().any(|e| p.ends_with(e))
 }
 
+/// Whether a path's extension is an image type (`store.ImageType`). A document's picture has to
+/// be named as one before the file is opened; its contents are then checked as well. The Go list
+/// also has `.avif`, which there is no decoder for here.
+pub fn is_image_path(path: &Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico")
+}
+
 /// Reads an address the way a browser does before deciding where it points: tabs and newlines
 /// are ignored, leading spaces and control characters are dropped, and `\` counts as `/`.
 fn url_normalise(u: &str) -> String {
@@ -187,6 +195,16 @@ mod tests {
         assert_eq!(resolve(d, "b.md").unwrap(), PathBuf::from("/home/me/docs/b.md"));
         assert_eq!(resolve(d, "../b%20c.md#frag").unwrap(), PathBuf::from("/home/me/b c.md"));
         assert_eq!(resolve(d, "sub/./b.md?x=1").unwrap(), PathBuf::from("/home/me/docs/sub/b.md"));
+    }
+
+    #[test]
+    fn only_image_names_count_as_images() {
+        for p in ["a.png", "b.JPG", "c.jpeg", "d.gif", "e.webp", "f.svg", "g.bmp", "h.ico", "/x/y.z.png"] {
+            assert!(is_image_path(Path::new(p)), "{p}");
+        }
+        for p in ["a", "a.txt", "secrets.md", "a.png.exe", "/etc/passwd", ".png", "a.ppm", "a.tiff"] {
+            assert!(!is_image_path(Path::new(p)), "{p}");
+        }
     }
 
     /// `TestIsWebURL` from `internal/doc/security_test.go`.
