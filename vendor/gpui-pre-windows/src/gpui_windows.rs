@@ -13,8 +13,9 @@ mod display;
 mod events;
 mod keyboard;
 mod platform;
+#[cfg(not(feature = "precompiled-shaders"))]
 mod shader_disk;
-mod spike_trace;
+mod mdv_trace;
 mod system_notifications;
 mod system_settings;
 mod util;

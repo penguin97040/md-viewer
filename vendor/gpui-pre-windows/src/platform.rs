@@ -1328,9 +1328,9 @@ impl WindowsPlatformInner {
 
     #[inline]
     fn run_foreground_task(&self) -> Option<isize> {
-        // Spike instrumentation: a slow task is on the same thread as the windows. The platform
+        // a slow task is on the same thread as the windows. The platform
         // window's message is already timed nowhere else, so it goes through `message` as well.
-        let _trace = SpikeTaskTrace(crate::spike_trace::start());
+        let _trace = TaskTrace(crate::mdv_trace::start());
         const MAIN_TASK_TIMEOUT: u128 = 10;
 
         let start = std::time::Instant::now();
@@ -2054,11 +2054,11 @@ mod tests {
     }
 }
 
-/// Spike instrumentation: times one turn of `run_foreground_task`, whichever way it returns.
-struct SpikeTaskTrace(Option<std::time::Instant>);
+/// times one turn of `run_foreground_task`, whichever way it returns.
+struct TaskTrace(Option<std::time::Instant>);
 
-impl Drop for SpikeTaskTrace {
+impl Drop for TaskTrace {
     fn drop(&mut self) {
-        crate::spike_trace::span("message", HWND::default(), WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD as i64, self.0);
+        crate::mdv_trace::span("message", HWND::default(), WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD as i64, self.0);
     }
 }

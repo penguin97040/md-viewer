@@ -1,4 +1,4 @@
-//! Spike instrumentation: what the UI thread does between pressing a window's header and the window
+//! Timing: what the UI thread does between pressing a window's header and the window
 //! following the pointer. Only when `MDV_TIMING` names a file; otherwise each call is one load.
 //!
 //! The UI thread only takes a time and sends a small value. A writer thread formats, buffers and
