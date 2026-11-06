@@ -5,12 +5,20 @@ on:
   pull_request:
   workflow_call:
   workflow_dispatch:
+  schedule:
+    - cron: "17 21 * * 1"   # advisories appear without any change here
 
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  CARGO_AUDIT_VERSION: 0.22.1
+  CARGO_DENY_VERSION: 0.20.2
+
 jobs:
-  go:
+  test:
     strategy:
       fail-fast: false
       matrix:
@@ -23,37 +31,45 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with:
-          go-version-file: go.mod
+      - name: Install Rust
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup show active-toolchain
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
-      - name: Install scanner
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
-      - name: Test and vet production packages
+          sudo apt-get install -y --no-install-recommends clang lld cmake pkg-config \
+            libxkbcommon-x11-dev libxkbcommon-dev libwayland-dev libxcb1-dev libxcb-xkb-dev \
+            libx11-xcb-dev libfontconfig-dev libfreetype-dev libasound2-dev libssl-dev
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: Generated files are current
+        if: runner.os == 'Linux'
         run: |
-          # Wails adds this framework when building; direct Go tests need it too.
-          if [[ "$RUNNER_OS" == "macOS" ]]; then
-            export CGO_LDFLAGS="${CGO_LDFLAGS:+$CGO_LDFLAGS }-framework UniformTypeIdentifiers"
-          fi
-          go test -tags desktop,production,webkit2_41 ./...
-          go vet -tags desktop,production,webkit2_41 ./...
-      - name: Scan production sources and full module graph
-        run: |
-          govulncheck -tags desktop,production,webkit2_41 ./...
-          govulncheck -scan module
+          python3 scripts/generate-theme.py
+          git diff --exit-code -- crates/theme
+          python3 scripts/generate-licences.py --check
 
-  vendor:
+  advisories:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - name: Install Rust
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: tools
         with:
-          node-version: 22.22.1
-      - name: Audit locked dependencies and verify bundled assets
-        run: bash scripts/update-vendor.sh --check
+          path: ~/.cargo-tools
+          key: cargo-tools-${{ runner.os }}-audit-${{ env.CARGO_AUDIT_VERSION }}-deny-${{ env.CARGO_DENY_VERSION }}
+      - name: Install cargo-audit and cargo-deny
+        if: steps.tools.outputs.cache-hit != 'true'
+        run: |
+          cargo install --locked --root ~/.cargo-tools --version "$CARGO_AUDIT_VERSION" cargo-audit
+          cargo install --locked --root ~/.cargo-tools --version "$CARGO_DENY_VERSION" cargo-deny
+      - name: cargo audit
+        run: ~/.cargo-tools/bin/cargo-audit audit --deny warnings
+      - name: cargo deny
+        run: ~/.cargo-tools/bin/cargo-deny --locked check

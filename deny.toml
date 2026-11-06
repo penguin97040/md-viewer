@@ -1,0 +1,60 @@
+[graph]
+targets = [
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+]
+
+[advisories]
+# Seven crates are flagged as unmaintained. None has a known vulnerability, and each is pulled in
+# by a pinned dependency, so nothing here can upgrade it. Each entry says why it is accepted;
+# review the list whenever GPUI, syntect, krilla or usvg is bumped. The same ids are in
+# .cargo/audit.toml for cargo-audit.
+ignore = [
+    { id = "RUSTSEC-2025-0141", reason = "bincode 1.3.3, from syntect: reads only the syntax dump built into the executable, never document data. Finished and frozen, not vulnerable." },
+    { id = "RUSTSEC-2024-0436", reason = "paste, from pulp, exr and image (GPUI's image features): a compile-time macro, no code in the executable." },
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz 0.20.1, used directly for PDF text shaping and by krilla, usvg and merman-export. Handles our bundled fonts; panics are contained. Move to harfrust when krilla and usvg do." },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser 0.25.1, from fontdb, usvg, rustybuzz, GPUI and RaTeX. Parses the bundled fonts and system fonts, never fonts from a document. Moves with its parents to skrifa." },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names, Linux only (GPUI portals, accessibility): merged into zbus 6, which GPUI has to adopt." },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant, Linux only, as zbus_names." },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive, Linux only, as zbus_names." },
+]
+
+[licenses]
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+]
+# Our own crates are published nowhere (publish = false) and carry the licence in LICENSE.
+private = { ignore = true }
+
+# MPL-2.0 is copyleft per file, not for the whole program: it lets MIT-licensed code link
+# against it, provided the MPL files stay available under the MPL (they are, on crates.io) and
+# any change to them is published. We change none of them. Allowed one crate at a time, so a new
+# MPL crate has to be looked at.
+exceptions = [
+    { allow = ["MPL-2.0"], crate = "cssparser" },        # CSS in SVG/HTML handling (merman)
+    { allow = ["MPL-2.0"], crate = "cssparser-macros" },
+    { allow = ["MPL-2.0"], crate = "dtoa-short" },
+    { allow = ["MPL-2.0"], crate = "dwrote" },           # DirectWrite bindings (Windows)
+    { allow = ["MPL-2.0"], crate = "option-ext" },       # dirs-sys, from zed-font-kit (macOS, Linux)
+    { allow = ["MPL-2.0"], crate = "cbindgen" },         # macOS build script only, not shipped
+]
+
+[bans]
+# Duplicate versions come from the pinned GPUI and diagram stacks and can't be fixed from here.
+multiple-versions = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -1,15 +1,11 @@
 # MD Viewer
 
 A small, fast markdown viewer for Windows, macOS and Linux. It's a single
-executable with no installer and no runtime to set up.
-
-This experimental branch applies Netherbase styling: bundled fonts, square
-controls and a black-and-orange default theme, with light mode still available.
-The title bar is integrated into the app, with native traffic lights on macOS.
-On narrow windows, **More actions** contains Print and Settings.
+executable with no installer and no runtime to set up, written in Rust with
+[GPUI](https://www.gpui.rs).
 
 <p align="center">
-  <a href="docs/screenshots/dark.png"><img src="docs/screenshots/dark.png" width="560" alt="MD Viewer in the dark theme, with tabs, a table of contents, a table and a diagram"></a>
+  <a href="docs/screenshots/dark.png"><img src="docs/screenshots/dark.png" width="560" alt="MD Viewer in the dark theme, with tabs, a table of contents and a table"></a>
 </p>
 <p align="center">
   <a href="docs/screenshots/light.png"><img src="docs/screenshots/light.png" width="180" alt="Light theme with maths and highlighted code"></a>
@@ -23,36 +19,44 @@ On narrow windows, **More actions** contains Print and Settings.
   opening a file again switches to its existing tab
 - Dark mode by default, with a light theme
 - GitHub-flavoured markdown: tables, task lists, footnotes, strikethrough,
-  autolinks, definition lists and raw HTML (sanitised)
-- Syntax highlighting for fenced code blocks, with an always-visible copy button
+  autolinks and definition lists
+- Syntax highlighting for fenced code blocks, with a copy button
 - Sortable tables: click a column heading to sort it
-- Save as PDF or print, always in light colours
-- Mermaid diagrams and KaTeX maths, drawn in the app (no internet needed)
-- Table of contents sidebar that follows your place in the document
+- Save as PDF, always in light colours
+- Mermaid diagrams and maths, drawn in the app (no internet needed)
+- Table of contents sidebar
 - Find in document, including parts of large files not yet on screen
-- Live reload when the file changes on disk, plus a reload button
-- Adjustable font size, line spacing, document padding and font
+- Adjustable font size, line spacing and font
 - Word wrap for code blocks and tables, which can be turned off
-- Handles large files (tested to 25 MB) by rendering only what's near the
+- Handles large files (tested to 25 MB) by laying out only what's near the
   screen
 - Opens local `.md` links in a new tab; web links open in your browser
-- Safe with files from anywhere: documents can't run script, and images from
-  the web only load if you agree (see [SECURITY.md](SECURITY.md))
+- Bundled Geist fonts; nothing is downloaded at run time
 
 ## Download
 
-Get the latest build from the [Releases](../../releases) page.
+Get the latest build from the [Releases](../../releases) page, and check it
+against `SHA256SUMS.txt`.
 
 | Platform | File | Notes |
 |---|---|---|
-| Windows 10/11 | `md-viewer-*-windows-amd64.exe` | Uses Microsoft Edge WebView2, which Windows 10 and 11 already include. |
-| macOS 11+ | `md-viewer-*-macos-universal.zip` | Unzip and move `md-viewer.app` to Applications. The app isn't signed, so the first time, right-click it and choose **Open**, or run `xattr -cr /Applications/md-viewer.app`. |
-| Linux (x86-64) | `md-viewer-*-linux-amd64.tar.gz` | Needs WebKitGTK 4.1, e.g. `sudo apt install libwebkit2gtk-4.1-0` on Debian or Ubuntu. |
+| Windows 10/11 (x86-64) | `md-viewer-*-windows-amd64.exe` | Needs a Direct3D 11 graphics driver, which any current PC has. The file isn't code-signed, so SmartScreen may ask the first time: choose **More info**, then **Run anyway**. |
+| macOS 11+ (Apple silicon and Intel) | `md-viewer-*-macos-universal.zip` | See the macOS note below. |
+| Linux (x86-64) | `md-viewer-*-linux-amd64.tar.gz` | Needs a Vulkan driver (for example `mesa-vulkan-drivers`) and X11 or Wayland. |
+
+**macOS is untested.** The macOS build comes from the same code and compiles, but
+nobody has run it on a Mac yet, so expect rough edges and please report them.
+The app isn't notarised, so the first time, unzip it, move `MD Viewer.app` to
+Applications, right-click it and choose **Open**, or run
+`xattr -cr "/Applications/MD Viewer.app"`.
+
+Every release file carries a build attestation, so you can check it was built
+from this repository: `gh attestation verify <file> --repo <owner>/<repo>`.
 
 ## Usage
 
-Open files with **Open** (Ctrl+O), by dropping them on the window, or from the
-command line. Each file gets its own tab:
+Open files with **Open** (Ctrl+O) or from the command line. Each file gets its
+own tab:
 
 ```
 md-viewer notes.md README.md
@@ -60,29 +64,22 @@ md-viewer notes.md README.md
 
 Drag a tab along the strip to reorder it, outside the viewer to open a new
 window, or onto another window's tab strip to move it there. Press Escape to
-cancel. Dropping inside a document cancels the move. Reading position and image
-consent follow the tab; its source window closes if it has no tabs left.
-Detaching by an outside drop requires Windows, macOS or Linux with X11;
-on Wayland, an outside drop cancels the move.
+cancel. Reading position follows
+the tab; its source window closes if it has no tabs left. On Wayland, an
+outside drop cancels the move.
 
 Files stay open in one tab across all windows. New files from another launch
 open in the most recently focused window. Tabs aren't restored on startup.
 
 To make it the default app for `.md` files on Windows, right-click a markdown
-file, choose **Open with › Choose another app**, browse to `md-viewer.exe` and
-tick **Always use this app**.
+file, choose **Open with › Choose another app**, browse to the executable and
+tick **Always use this app**. On macOS, use **Get Info › Open with**.
 
 ### Saving as PDF
 
-Click the printer button (Ctrl+P). MD Viewer renders the whole document and
-opens the system print dialog. To get a PDF, choose:
-
-- **Save as PDF** as the destination on Windows,
-- **PDF › Save as PDF** on macOS,
-- **Print to File** on Linux.
-
-The PDF uses light colours whatever theme you're using. Very large files can
-take a while to prepare, and you can cancel this.
+Press Ctrl+P. MD Viewer asks where to save, renders the whole document as a
+PDF in light colours whatever theme you're using, and offers to open it. Very
+large files can take a while to prepare, and you can cancel this.
 
 ### Keyboard shortcuts
 
@@ -92,76 +89,43 @@ every platform).
 | Action | Shortcut |
 |---|---|
 | Open file (new tab) | Ctrl+O |
-| Close tab | Ctrl+W, or middle-click the tab |
+| Close tab | Ctrl+W |
 | Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab (or Ctrl+PgDn / Ctrl+PgUp) |
 | Go to tab 1–8 / last tab | Ctrl+1 … Ctrl+8 / Ctrl+9 |
-| Reload | F5 or Ctrl+R |
-| Save as PDF / print | Ctrl+P |
+| Save as PDF | Ctrl+P |
 | Table of contents | Ctrl+B |
 | Find | Ctrl+F, then Enter / Shift+Enter (or F3 / Shift+F3) |
-| Larger / smaller text | Ctrl+= / Ctrl+- or Ctrl+mouse wheel |
+| Larger / smaller text | Ctrl+= / Ctrl+- |
 | Reset text size | Ctrl+0 |
-| Toggle word wrap | Alt+Z |
 | Toggle dark / light | Ctrl+Shift+D |
-
-Settings are saved to `md-viewer/settings.json` in your user config folder
-(`%AppData%` on Windows, `~/Library/Application Support` on macOS,
-`~/.config` on Linux).
+| Copy / select all | Ctrl+C / Ctrl+A |
 
 ## Building from source
 
-You need [Go](https://go.dev/dl/) 1.26.10 or newer and the
-[Wails v2](https://wails.io/docs/gettingstarted/installation) CLI:
+You need [Rust](https://rustup.rs); the repository pins the version in
+`rust-toolchain.toml`. On Linux, install the packages listed in
+[docs/BUILDING.md](docs/BUILDING.md). Then:
 
 ```
-go install github.com/wailsapp/wails/v2/cmd/wails@v2.16.0
+cargo build --release
 ```
 
-Then, from the repository root:
-
-```
-wails build                                   # for the current platform
-wails build -platform windows/amd64           # Windows (can be built from Linux or macOS)
-wails build -tags webkit2_41                  # Linux with WebKitGTK 4.1
-```
-
-The executable is written to `build/bin/`. Linux builds need
-`libgtk-3-dev` and `libwebkit2gtk-4.1-dev`.
-
-Theme colours are generated from `design/tokens.json`. After changing the
-source tokens, run `python3 scripts/generate-theme.py` and include the generated
-CSS and native background in the same commit. Fonts and their licences are
-bundled under `frontend/fonts/`; no fonts are downloaded at runtime.
-
-Run the tests with `go test ./...`. For quick work on the interface,
-`go run ./cmd/devserver file.md` serves the frontend to an ordinary browser at
-<http://127.0.0.1:8080>. `scripts/screenshots.mjs` regenerates the screenshots
-above (see the comment at the top of the file).
-
-Frontend assets are already bundled; Node.js 22.22.1 and npm are only needed
-for vendor maintenance. CI uses that Node.js version to verify generated assets.
-Compression uses a pinned JavaScript library to avoid system zlib differences.
-Run `bash scripts/update-vendor.sh` to rebuild from `scripts/vendor/package-lock.json`,
-or `bash scripts/update-vendor.sh --check` to verify the checked-in assets. To update
-dependencies, edit `scripts/vendor/package.json`, regenerate its lock with npm,
-audit it with `npm audit --prefix scripts/vendor --audit-level=info`, then rebuild
-and update [THIRD-PARTY.md](THIRD-PARTY.md).
+The executable is `target/release/md-viewer` (`md-viewer.exe` on Windows).
+Run the tests with `cargo test --workspace`.
+[docs/BUILDING.md](docs/BUILDING.md) covers the platform details, how releases
+are made (including precompiled Windows shaders and the macOS bundle), the
+dependency checks and the screenshots.
 
 ### How it works
 
-Markdown is parsed in Go with [goldmark](https://github.com/yuin/goldmark). A
-document is split into chunks of about 16 KB, and each chunk's HTML is rendered
-only when it scrolls near the view. Chunks far from the view are emptied again.
-Files over 1 MB are cut into sections at safe block boundaries and parsed in
-parallel, so a 25 MB file opens in well under a second and memory stays close
-to the file's size. Mermaid and KaTeX are embedded in the executable,
-compressed, and only loaded when a document uses them.
-
-Each chunk's HTML is sanitised before the page sees it, and the page's
-Content-Security-Policy keeps out script and anything from outside the app.
-[SECURITY.md](SECURITY.md) has the details and how to report a problem.
+Markdown is parsed with [pulldown-cmark](https://github.com/pulldown-cmark/pulldown-cmark)
+into a document model, which the app lays out and draws itself with GPUI: there
+is no web view. Only blocks near the window are laid out and painted, and
+files over 1 MB are parsed in parallel sections, so a 25 MB file opens quickly. Maths (RaTeX) and Mermaid
+diagrams are turned into vector images in the app. [SECURITY.md](SECURITY.md)
+describes what a document can and can't do, and how to report a problem.
 
 ## Licence
 
-MIT. See [LICENSE](LICENSE). Bundled third-party components are listed in
-[THIRD-PARTY.md](THIRD-PARTY.md).
+MIT. See [LICENSE](LICENSE). Bundled fonts and the Rust crates in the
+executable are listed in [THIRD-PARTY.md](THIRD-PARTY.md).
