@@ -42,6 +42,8 @@ private = { ignore = true }
 # any change to them is published. We change none of them. Allowed one crate at a time, so a new
 # MPL crate has to be looked at.
 exceptions = [
+    # Mozilla's root certificate list, a permissive data licence (attribution, no copyleft).
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
     { allow = ["MPL-2.0"], crate = "cssparser" },        # CSS in SVG/HTML handling (merman)
     { allow = ["MPL-2.0"], crate = "cssparser-macros" },
     { allow = ["MPL-2.0"], crate = "dtoa-short" },
