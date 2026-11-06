@@ -110,8 +110,10 @@ impl std::error::Error for PrintError {}
 pub struct Report {
     pub pages: usize,
     pub chunks: usize,
-    /// Characters none of the fonts has a glyph for. They print as the font's blank glyph.
+    /// Characters none of the embedded fonts has a glyph for. They print as the font's empty box.
     pub missing_glyphs: usize,
+    /// The first few different ones, to name to the person.
+    pub missing_sample: Vec<char>,
     pub failed_math: usize,
     pub failed_diagrams: usize,
     pub failed_images: usize,
@@ -196,6 +198,7 @@ fn render_inner(doc: &Document, opts: &PrintOptions, ctl: &mut dyn FnMut(Progres
         plan.add_chunk(i, &c, &l);
     }
     report.missing_glyphs = shaper.missing;
+    report.missing_sample = shaper.missing_sample;
     let plan = plan.finish();
     report.pages = plan.pages.len();
 

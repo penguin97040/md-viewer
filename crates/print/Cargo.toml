@@ -12,6 +12,7 @@ mdv-content = { path = "../content", features = ["merman"] }
 krilla.workspace = true
 krilla-svg.workspace = true
 rustybuzz.workspace = true
+unicode-segmentation.workspace = true
 usvg.workspace = true
 image.workspace = true
 
