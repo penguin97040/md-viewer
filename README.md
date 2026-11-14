@@ -52,11 +52,9 @@ against `SHA256SUMS.txt`.
 | macOS 11+ (Apple silicon and Intel) | `md-viewer-*-macos-universal.zip` | See the macOS note below. |
 | Linux (x86-64) | `md-viewer-*-linux-amd64.tar.gz` | Needs a Vulkan driver (for example `mesa-vulkan-drivers`) and X11 or Wayland. No WebKitGTK needed. |
 
-**macOS is new and less tested** than Windows and Linux. The macOS build comes
-from the same code, but few people have run it on a Mac, so expect rough edges
-and please report them. The app is signed ad hoc, not notarised, so the first
-time, unzip it, move `MD Viewer.app` to Applications, right-click it and choose
-**Open**, or run `xattr -cr "/Applications/MD Viewer.app"`.
+On macOS, the app is signed ad hoc, not notarised, so the first time, unzip
+it, move `MD Viewer.app` to Applications, right-click it and choose **Open**,
+or run `xattr -cr "/Applications/MD Viewer.app"`.
 
 Every release file carries a build attestation, so you can check it was built
 from this repository: `gh attestation verify <file> --repo <owner>/<repo>`.
@@ -143,7 +141,6 @@ dependency checks and the screenshots.
 - AVIF images aren't shown, and animated GIFs show their first frame.
 - Web images use the Mozilla root certificates built into the app, so they fail
   on networks that inspect TLS with their own certificate.
-- macOS is new and less tested.
 
 ### How it works
 

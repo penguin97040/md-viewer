@@ -234,7 +234,7 @@ pub fn viewer_options(bounds: Bounds<Pixels>) -> WindowOptions {
         window_min_size: Some(size(px(320.0), px(240.0))),
         app_id: Some("md-viewer".into()),
         // Windows and macOS: no system title bar; the app draws the header. On macOS the native
-        // traffic lights stay, placed inside the 88px left inset. Position is a guess (untested).
+        // traffic lights stay, placed inside the 88px left inset.
         titlebar: Some(TitlebarOptions {
             title: Some("MD Viewer".into()),
             appears_transparent: true,

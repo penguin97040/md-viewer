@@ -96,7 +96,7 @@ untrusted:
 - **Fonts.** Maths drawing and PDF output may read a font file already on your
   computer for characters outside the built-in fonts. Nothing in a document
   chooses which file is read.
-- **Platforms.** Most of the checks above were run on Linux. The Windows and
-  macOS code was compiled for those systems but has had little real use, and
-  macOS is newer and less tested. Treat the platform-specific protections
-  (network paths, the launch channel) as less proven there.
+- **Platforms.** Most of the checks above were run on Linux. The automated
+  tests also run on Windows and macOS, and the app has been used on both, but
+  treat the platform-specific protections (network paths, the launch channel)
+  as less proven there.
