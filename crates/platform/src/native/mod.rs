@@ -35,7 +35,7 @@ pub enum NativeWindow {
 pub enum Backend {
     /// Global pointer, stacking and work area from the X server. Run under Xvfb.
     X11,
-    /// Global pointer and hit-testing from Win32. Compile-only.
+    /// Global pointer and hit-testing from Win32. Run on Windows.
     Windows,
     /// No global pointer or window position: an outside release must cancel.
     Wayland,

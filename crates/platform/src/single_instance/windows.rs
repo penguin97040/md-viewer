@@ -1,5 +1,4 @@
-//! Windows: COMPILE-ONLY. A named pipe per user and session, open to this user only, refusing remote
-//! clients. This file has never run on a Windows machine.
+//! Windows: a named pipe per user and session, open to this user only, refusing remote clients.
 //!
 //! A local process that creates the pipe name first could read launch paths. `lock_path` is in the
 //! user's private AppData and decides ownership, and an owner that cannot create the first instance

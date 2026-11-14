@@ -1,4 +1,4 @@
-//! Win32: COMPILE-ONLY. This file has never run on a Windows machine.
+//! Win32. Run on Windows, where tab detach between windows uses it.
 //!
 //! `WindowFromPoint` skips hidden windows. Coordinates are physical only if the process is DPI aware,
 //! which the executable's manifest declares (per-monitor).
