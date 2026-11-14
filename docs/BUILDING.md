@@ -123,8 +123,8 @@ universal binary, signs it ad hoc and zips it. It is not notarised. `icon.icns` 
 GPUI's Metal shaders are compiled at run time (`runtime_shaders`), so the build needs no Xcode Metal
 toolchain.
 
-`cargo check` for `aarch64-apple-darwin` works from Linux only with a stand-in for one generated
-Metal file that the GPUI build script produces on a Mac. Real builds and tests run on the macOS CI
+On Linux, `cargo check --target aarch64-apple-darwin` works only with a stand-in for one generated
+Metal file that the GPUI build script produces on a Mac. Builds and tests run on the macOS CI
 runner, and the packaged app has been tested on a Mac.
 
 ## Release builds

@@ -1,5 +1,5 @@
-//! Linux and macOS: a Unix socket in a directory only this user can enter. Run on Linux under X11.
-//! macOS has not been built or run.
+//! Linux and macOS: a Unix socket in a directory only this user can enter. Run on Linux under X11
+//! and on macOS.
 
 use std::fs::{self, DirBuilder};
 use std::io;
